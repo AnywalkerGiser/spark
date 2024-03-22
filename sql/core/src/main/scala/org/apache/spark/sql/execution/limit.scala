@@ -26,6 +26,7 @@ import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.catalyst.util.truncatedString
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.execution.metric.{SQLShuffleReadMetricsReporter, SQLShuffleWriteMetricsReporter}
+import org.apache.spark.util.ArrayImplicits._
 import org.apache.spark.util.collection.Utils
 
 /**
@@ -49,11 +50,6 @@ case class CollectLimitExec(limit: Int = -1, child: SparkPlan, offset: Int = 0) 
   override def output: Seq[Attribute] = child.output
   override def outputPartitioning: Partitioning = SinglePartition
   override def executeCollect(): Array[InternalRow] = {
-    // Because CollectLimitExec collect all the output of child to a single partition, so we need
-    // collect the first `limit` + `offset` elements and then to drop the first `offset` elements.
-    // For example: limit is 1 and offset is 2 and the child output two partition.
-    // The first partition output [1, 2] and the Second partition output [3, 4, 5].
-    // Then [1, 2, 3] will be taken and output [3].
     if (limit >= 0) {
       if (offset > 0) {
         child.executeTake(limit).drop(offset)
@@ -133,7 +129,7 @@ case class CollectTailExec(limit: Int, child: SparkPlan) extends LimitExec {
 
     // If we use this execution plan separately like `Dataset.limit` without an actual
     // job launch, we might just have to mimic the implementation of `CollectLimitExec`.
-    sparkContext.parallelize(executeCollect(), numSlices = 1)
+    sparkContext.parallelize(executeCollect().toImmutableArraySeq, numSlices = 1)
   }
 
   override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan =
@@ -276,18 +272,24 @@ case class TakeOrderedAndProjectExec(
     sortOrder: Seq[SortOrder],
     projectList: Seq[NamedExpression],
     child: SparkPlan,
-    offset: Int = 0) extends UnaryExecNode {
+    offset: Int = 0) extends OrderPreservingUnaryExecNode {
 
   override def output: Seq[Attribute] = {
     projectList.map(_.toAttribute)
   }
 
-  override def executeCollect(): Array[InternalRow] = {
+  override def executeCollect(): Array[InternalRow] = executeQuery {
+    val orderingSatisfies = SortOrder.orderingSatisfies(child.outputOrdering, sortOrder)
     val ord = new LazilyGeneratedOrdering(sortOrder, child.output)
-    val limited = child.execute().mapPartitionsInternal(_.map(_.copy())).takeOrdered(limit)(ord)
+    val limited = if (orderingSatisfies) {
+      child.execute().mapPartitionsInternal(_.map(_.copy()).take(limit)).takeOrdered(limit)(ord)
+    } else {
+      child.execute().mapPartitionsInternal(_.map(_.copy())).takeOrdered(limit)(ord)
+    }
     val data = if (offset > 0) limited.drop(offset) else limited
     if (projectList != child.output) {
       val proj = UnsafeProjection.create(projectList, child.output)
+      proj.initialize(0)
       data.map(r => proj(r).copy())
     } else {
       data
@@ -303,6 +305,7 @@ case class TakeOrderedAndProjectExec(
   override lazy val metrics = readMetrics ++ writeMetrics
 
   protected override def doExecute(): RDD[InternalRow] = {
+    val orderingSatisfies = SortOrder.orderingSatisfies(child.outputOrdering, sortOrder)
     val ord = new LazilyGeneratedOrdering(sortOrder, child.output)
     val childRDD = child.execute()
     if (childRDD.getNumPartitions == 0) {
@@ -311,8 +314,12 @@ case class TakeOrderedAndProjectExec(
       val singlePartitionRDD = if (childRDD.getNumPartitions == 1) {
         childRDD
       } else {
-        val localTopK = childRDD.mapPartitionsInternal { iter =>
-          Utils.takeOrdered(iter.map(_.copy()), limit)(ord)
+        val localTopK = if (orderingSatisfies) {
+          childRDD.mapPartitionsInternal(_.map(_.copy()).take(limit))
+        } else {
+          childRDD.mapPartitionsInternal { iter =>
+            Utils.takeOrdered(iter.map(_.copy()), limit)(ord)
+          }
         }
 
         new ShuffledRowRDD(
@@ -324,11 +331,12 @@ case class TakeOrderedAndProjectExec(
             writeMetrics),
           readMetrics)
       }
-      singlePartitionRDD.mapPartitionsInternal { iter =>
+      singlePartitionRDD.mapPartitionsWithIndexInternal { (idx, iter) =>
         val limited = Utils.takeOrdered(iter.map(_.copy()), limit)(ord)
         val topK = if (offset > 0) limited.drop(offset) else limited
         if (projectList != child.output) {
           val proj = UnsafeProjection.create(projectList, child.output)
+          proj.initialize(idx)
           topK.map(r => proj(r))
         } else {
           topK
@@ -337,7 +345,9 @@ case class TakeOrderedAndProjectExec(
     }
   }
 
-  override def outputOrdering: Seq[SortOrder] = sortOrder
+  override protected def outputExpressions: Seq[NamedExpression] = projectList
+
+  override protected def orderingExpressions: Seq[SortOrder] = sortOrder
 
   override def outputPartitioning: Partitioning = SinglePartition
 

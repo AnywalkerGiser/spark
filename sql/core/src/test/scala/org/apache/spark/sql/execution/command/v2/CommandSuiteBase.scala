@@ -21,9 +21,8 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.analysis.ResolvePartitionSpec
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.connector.catalog.{CatalogV2Implicits, Identifier, InMemoryCatalog, InMemoryPartitionTable, InMemoryPartitionTableCatalog, InMemoryTableCatalog}
-import org.apache.spark.sql.connector.catalog.functions.UnboundFunction
 import org.apache.spark.sql.test.SharedSparkSession
-import org.apache.spark.util.Utils
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * The trait contains settings and utility functions. It can be mixed to the test suites for
@@ -35,14 +34,13 @@ trait CommandSuiteBase extends SharedSparkSession {
   def catalogVersion: String = "V2" // The catalog version is added to test names
   def commandVersion: String = "V2" // The command version is added to test names
   def catalog: String = "test_catalog" // The default V2 catalog for testing
-  def funCatalog: String = s"fun_$catalog"
   def defaultUsing: String = "USING _" // The clause is used in creating v2 tables under testing
 
   // V2 catalogs created and used especially for testing
   override def sparkConf: SparkConf = super.sparkConf
     .set(s"spark.sql.catalog.$catalog", classOf[InMemoryPartitionTableCatalog].getName)
     .set(s"spark.sql.catalog.non_part_$catalog", classOf[InMemoryTableCatalog].getName)
-    .set(s"spark.sql.catalog.$funCatalog", classOf[InMemoryCatalog].getName)
+    .set(s"spark.sql.catalog.fun_$catalog", classOf[InMemoryCatalog].getName)
 
   def checkLocation(
       t: String,
@@ -59,23 +57,11 @@ trait CommandSuiteBase extends SharedSparkSession {
     val partTable = catalogPlugin.asTableCatalog
       .loadTable(Identifier.of(namespaces, tableName))
       .asInstanceOf[InMemoryPartitionTable]
-    val ident = ResolvePartitionSpec.convertToPartIdent(spec, partTable.partitionSchema.fields)
+    val ident = ResolvePartitionSpec.convertToPartIdent(spec,
+      partTable.partitionSchema.fields.toImmutableArraySeq)
     val partMetadata = partTable.loadPartitionMetadata(ident)
 
     assert(partMetadata.containsKey("location"))
     assert(partMetadata.get("location") === expected)
-  }
-
-
-  def withFun(ident: Identifier, fn: UnboundFunction)(f: => Unit): Unit = {
-    val cat = spark.sessionState
-      .catalogManager
-      .catalog(funCatalog)
-      .asInstanceOf[InMemoryCatalog]
-
-    cat.createFunction(ident, fn)
-    Utils.tryWithSafeFinally(f) {
-      cat.dropFunction(ident)
-    }
   }
 }

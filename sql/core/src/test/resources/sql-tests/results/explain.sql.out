@@ -32,6 +32,14 @@ struct<>
 
 
 -- !query
+CREATE table  explain_temp5 (key int) USING PARQUET PARTITIONED BY(val string)
+-- !query schema
+struct<>
+-- !query output
+
+
+
+-- !query
 SET spark.sql.codegen.wholeStage = true
 -- !query schema
 struct<key:string,value:string>
@@ -47,19 +55,19 @@ EXPLAIN EXTENDED
 struct<plan:string>
 -- !query output
 == Parsed Logical Plan ==
-'Project [unresolvedalias('sum(distinct 'val), None)]
+'Project [unresolvedalias('sum(distinct 'val))]
 +- 'UnresolvedRelation [explain_temp1], [], false
 
 == Analyzed Logical Plan ==
 sum(DISTINCT val): bigint
 Aggregate [sum(distinct val#x) AS sum(DISTINCT val)#xL]
 +- SubqueryAlias spark_catalog.default.explain_temp1
-   +- Relation default.explain_temp1[key#x,val#x] parquet
+   +- Relation spark_catalog.default.explain_temp1[key#x,val#x] parquet
 
 == Optimized Logical Plan ==
 Aggregate [sum(distinct val#x) AS sum(DISTINCT val)#xL]
 +- Project [val#x]
-   +- Relation default.explain_temp1[key#x,val#x] parquet
+   +- Relation spark_catalog.default.explain_temp1[key#x,val#x] parquet
 
 == Physical Plan ==
 *HashAggregate(keys=[], functions=[sum(distinct val#x)], output=[sum(DISTINCT val)#xL])
@@ -69,7 +77,7 @@ Aggregate [sum(distinct val#x) AS sum(DISTINCT val)#xL]
          +- Exchange hashpartitioning(val#x, 4), ENSURE_REQUIREMENTS, [plan_id=x]
             +- *HashAggregate(keys=[val#x], functions=[], output=[val#x])
                +- *ColumnarToRow
-                  +- FileScan parquet default.explain_temp1[val#x] Batched: true, DataFilters: [], Format: Parquet, Location [not included in comparison]/{warehouse_dir}/explain_temp1], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<val:int>
+                  +- FileScan parquet spark_catalog.default.explain_temp1[val#x] Batched: true, DataFilters: [], Format: Parquet, Location [not included in comparison]/{warehouse_dir}/explain_temp1], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<val:int>
 
 
 -- !query
@@ -90,10 +98,10 @@ struct<plan:string>
          +- * HashAggregate (4)
             +- * Filter (3)
                +- * ColumnarToRow (2)
-                  +- Scan parquet default.explain_temp1 (1)
+                  +- Scan parquet spark_catalog.default.explain_temp1 (1)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -151,10 +159,10 @@ struct<plan:string>
       +- * HashAggregate (4)
          +- * Filter (3)
             +- * ColumnarToRow (2)
-               +- Scan parquet default.explain_temp1 (1)
+               +- Scan parquet spark_catalog.default.explain_temp1 (1)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -206,13 +214,13 @@ struct<plan:string>
       +- Union (7)
          :- * Filter (3)
          :  +- * ColumnarToRow (2)
-         :     +- Scan parquet default.explain_temp1 (1)
+         :     +- Scan parquet spark_catalog.default.explain_temp1 (1)
          +- * Filter (6)
             +- * ColumnarToRow (5)
-               +- Scan parquet default.explain_temp1 (4)
+               +- Scan parquet spark_catalog.default.explain_temp1 (4)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -226,7 +234,7 @@ Input [2]: [key#x, val#x]
 Input [2]: [key#x, val#x]
 Condition : (isnotnull(key#x) AND (key#x > 0))
 
-(4) Scan parquet default.explain_temp1
+(4) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -274,14 +282,14 @@ struct<plan:string>
 * BroadcastHashJoin Inner BuildRight (8)
 :- * Filter (3)
 :  +- * ColumnarToRow (2)
-:     +- Scan parquet default.explain_temp1 (1)
+:     +- Scan parquet spark_catalog.default.explain_temp1 (1)
 +- BroadcastExchange (7)
    +- * Filter (6)
       +- * ColumnarToRow (5)
-         +- Scan parquet default.explain_temp2 (4)
+         +- Scan parquet spark_catalog.default.explain_temp2 (4)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -295,7 +303,7 @@ Input [2]: [key#x, val#x]
 Input [2]: [key#x, val#x]
 Condition : isnotnull(key#x)
 
-(4) Scan parquet default.explain_temp2
+(4) Scan parquet spark_catalog.default.explain_temp2
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp2]
@@ -316,6 +324,7 @@ Arguments: HashedRelationBroadcastMode(List(cast(input[0, int, false] as bigint)
 (8) BroadcastHashJoin [codegen id : 2]
 Left keys [1]: [key#x]
 Right keys [1]: [key#x]
+Join type: Inner
 Join condition: None
 
 
@@ -331,14 +340,14 @@ struct<plan:string>
 == Physical Plan ==
 * BroadcastHashJoin LeftOuter BuildRight (7)
 :- * ColumnarToRow (2)
-:  +- Scan parquet default.explain_temp1 (1)
+:  +- Scan parquet spark_catalog.default.explain_temp1 (1)
 +- BroadcastExchange (6)
    +- * Filter (5)
       +- * ColumnarToRow (4)
-         +- Scan parquet default.explain_temp2 (3)
+         +- Scan parquet spark_catalog.default.explain_temp2 (3)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -347,7 +356,7 @@ ReadSchema: struct<key:int,val:int>
 (2) ColumnarToRow [codegen id : 2]
 Input [2]: [key#x, val#x]
 
-(3) Scan parquet default.explain_temp2
+(3) Scan parquet spark_catalog.default.explain_temp2
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp2]
@@ -368,6 +377,7 @@ Arguments: HashedRelationBroadcastMode(List(cast(input[0, int, false] as bigint)
 (7) BroadcastHashJoin [codegen id : 2]
 Left keys [1]: [key#x]
 Right keys [1]: [key#x]
+Join type: LeftOuter
 Join condition: None
 
 
@@ -388,14 +398,14 @@ struct<plan:string>
 == Physical Plan ==
 * Filter (3)
 +- * ColumnarToRow (2)
-   +- Scan parquet default.explain_temp1 (1)
+   +- Scan parquet spark_catalog.default.explain_temp1 (1)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
-PushedFilters: [IsNotNull(key), IsNotNull(val), GreaterThan(val,3)]
+PushedFilters: [IsNotNull(key), IsNotNull(val), EqualTo(key,ScalarSubquery#x), GreaterThan(val,3)]
 ReadSchema: struct<key:int,val:int>
 
 (2) ColumnarToRow [codegen id : 1]
@@ -403,25 +413,27 @@ Input [2]: [key#x, val#x]
 
 (3) Filter [codegen id : 1]
 Input [2]: [key#x, val#x]
-Condition : (((isnotnull(key#x) AND isnotnull(val#x)) AND (key#x = Subquery scalar-subquery#x, [id=#x])) AND (val#x > 3))
+Condition : (((isnotnull(key#x) AND isnotnull(val#x)) AND (key#x = ReusedSubquery Subquery scalar-subquery#x, [id=#x])) AND (val#x > 3))
 
 ===== Subqueries =====
 
-Subquery:1 Hosting operator id = 3 Hosting Expression = Subquery scalar-subquery#x, [id=#x]
+Subquery:1 Hosting operator id = 3 Hosting Expression = ReusedSubquery Subquery scalar-subquery#x, [id=#x]
+
+Subquery:2 Hosting operator id = 1 Hosting Expression = Subquery scalar-subquery#x, [id=#x]
 * HashAggregate (10)
 +- Exchange (9)
    +- * HashAggregate (8)
       +- * Project (7)
          +- * Filter (6)
             +- * ColumnarToRow (5)
-               +- Scan parquet default.explain_temp2 (4)
+               +- Scan parquet spark_catalog.default.explain_temp2 (4)
 
 
-(4) Scan parquet default.explain_temp2
+(4) Scan parquet spark_catalog.default.explain_temp2
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp2]
-PushedFilters: [IsNotNull(key), IsNotNull(val), EqualTo(val,2)]
+PushedFilters: [IsNotNull(key), IsNotNull(val), EqualTo(key,ScalarSubquery#x), EqualTo(val,2)]
 ReadSchema: struct<key:int,val:int>
 
 (5) ColumnarToRow [codegen id : 1]
@@ -429,7 +441,7 @@ Input [2]: [key#x, val#x]
 
 (6) Filter [codegen id : 1]
 Input [2]: [key#x, val#x]
-Condition : (((isnotnull(key#x) AND isnotnull(val#x)) AND (key#x = Subquery scalar-subquery#x, [id=#x])) AND (val#x = 2))
+Condition : (((isnotnull(key#x) AND isnotnull(val#x)) AND (key#x = ReusedSubquery Subquery scalar-subquery#x, [id=#x])) AND (val#x = 2))
 
 (7) Project [codegen id : 1]
 Output [1]: [key#x]
@@ -453,17 +465,19 @@ Functions [1]: [max(key#x)]
 Aggregate Attributes [1]: [max(key#x)#x]
 Results [1]: [max(key#x)#x AS max(key)#x]
 
-Subquery:2 Hosting operator id = 6 Hosting Expression = Subquery scalar-subquery#x, [id=#x]
+Subquery:3 Hosting operator id = 6 Hosting Expression = ReusedSubquery Subquery scalar-subquery#x, [id=#x]
+
+Subquery:4 Hosting operator id = 4 Hosting Expression = Subquery scalar-subquery#x, [id=#x]
 * HashAggregate (17)
 +- Exchange (16)
    +- * HashAggregate (15)
       +- * Project (14)
          +- * Filter (13)
             +- * ColumnarToRow (12)
-               +- Scan parquet default.explain_temp3 (11)
+               +- Scan parquet spark_catalog.default.explain_temp3 (11)
 
 
-(11) Scan parquet default.explain_temp3
+(11) Scan parquet spark_catalog.default.explain_temp3
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp3]
@@ -517,10 +531,10 @@ struct<plan:string>
 == Physical Plan ==
 * Filter (3)
 +- * ColumnarToRow (2)
-   +- Scan parquet default.explain_temp1 (1)
+   +- Scan parquet spark_catalog.default.explain_temp1 (1)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -531,21 +545,25 @@ Input [2]: [key#x, val#x]
 
 (3) Filter [codegen id : 1]
 Input [2]: [key#x, val#x]
-Condition : ((key#x = Subquery scalar-subquery#x, [id=#x]) OR (cast(key#x as double) = Subquery scalar-subquery#x, [id=#x]))
+Condition : ((key#x = ReusedSubquery Subquery scalar-subquery#x, [id=#x]) OR (cast(key#x as double) = ReusedSubquery Subquery scalar-subquery#x, [id=#x]))
 
 ===== Subqueries =====
 
-Subquery:1 Hosting operator id = 3 Hosting Expression = Subquery scalar-subquery#x, [id=#x]
+Subquery:1 Hosting operator id = 3 Hosting Expression = ReusedSubquery Subquery scalar-subquery#x, [id=#x]
+
+Subquery:2 Hosting operator id = 3 Hosting Expression = ReusedSubquery Subquery scalar-subquery#x, [id=#x]
+
+Subquery:3 Hosting operator id = 1 Hosting Expression = Subquery scalar-subquery#x, [id=#x]
 * HashAggregate (10)
 +- Exchange (9)
    +- * HashAggregate (8)
       +- * Project (7)
          +- * Filter (6)
             +- * ColumnarToRow (5)
-               +- Scan parquet default.explain_temp2 (4)
+               +- Scan parquet spark_catalog.default.explain_temp2 (4)
 
 
-(4) Scan parquet default.explain_temp2
+(4) Scan parquet spark_catalog.default.explain_temp2
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp2]
@@ -581,17 +599,17 @@ Functions [1]: [max(key#x)]
 Aggregate Attributes [1]: [max(key#x)#x]
 Results [1]: [max(key#x)#x AS max(key)#x]
 
-Subquery:2 Hosting operator id = 3 Hosting Expression = Subquery scalar-subquery#x, [id=#x]
+Subquery:4 Hosting operator id = 1 Hosting Expression = Subquery scalar-subquery#x, [id=#x]
 * HashAggregate (17)
 +- Exchange (16)
    +- * HashAggregate (15)
       +- * Project (14)
          +- * Filter (13)
             +- * ColumnarToRow (12)
-               +- Scan parquet default.explain_temp3 (11)
+               +- Scan parquet spark_catalog.default.explain_temp3 (11)
 
 
-(11) Scan parquet default.explain_temp3
+(11) Scan parquet spark_catalog.default.explain_temp3
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp3]
@@ -638,10 +656,10 @@ struct<plan:string>
 == Physical Plan ==
 * Project (3)
 +- * ColumnarToRow (2)
-   +- Scan parquet default.explain_temp1 (1)
+   +- Scan parquet spark_catalog.default.explain_temp1 (1)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output: []
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -661,10 +679,10 @@ Subquery:1 Hosting operator id = 3 Hosting Expression = Subquery scalar-subquery
 +- Exchange (7)
    +- * HashAggregate (6)
       +- * ColumnarToRow (5)
-         +- Scan parquet default.explain_temp1 (4)
+         +- Scan parquet spark_catalog.default.explain_temp1 (4)
 
 
-(4) Scan parquet default.explain_temp1
+(4) Scan parquet spark_catalog.default.explain_temp1
 Output [1]: [key#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -709,14 +727,14 @@ struct<plan:string>
 * BroadcastHashJoin Inner BuildRight (8)
 :- * Filter (3)
 :  +- * ColumnarToRow (2)
-:     +- Scan parquet default.explain_temp1 (1)
+:     +- Scan parquet spark_catalog.default.explain_temp1 (1)
 +- BroadcastExchange (7)
    +- * Filter (6)
       +- * ColumnarToRow (5)
-         +- Scan parquet default.explain_temp1 (4)
+         +- Scan parquet spark_catalog.default.explain_temp1 (4)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -730,7 +748,7 @@ Input [2]: [key#x, val#x]
 Input [2]: [key#x, val#x]
 Condition : (isnotnull(key#x) AND (key#x > 10))
 
-(4) Scan parquet default.explain_temp1
+(4) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -751,6 +769,7 @@ Arguments: HashedRelationBroadcastMode(List(cast(input[0, int, false] as bigint)
 (8) BroadcastHashJoin [codegen id : 2]
 Left keys [1]: [key#x]
 Right keys [1]: [key#x]
+Join type: Inner
 Join condition: None
 
 
@@ -773,13 +792,13 @@ struct<plan:string>
 :     +- * HashAggregate (4)
 :        +- * Filter (3)
 :           +- * ColumnarToRow (2)
-:              +- Scan parquet default.explain_temp1 (1)
+:              +- Scan parquet spark_catalog.default.explain_temp1 (1)
 +- BroadcastExchange (9)
    +- * HashAggregate (8)
       +- ReusedExchange (7)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -828,6 +847,7 @@ Arguments: HashedRelationBroadcastMode(List(cast(input[0, int, true] as bigint))
 (10) BroadcastHashJoin [codegen id : 4]
 Left keys [1]: [key#x]
 Right keys [1]: [key#x]
+Join type: Inner
 Join condition: None
 
 
@@ -850,10 +870,10 @@ Execute CreateViewCommand (1)
 Output: []
 
 (2) CreateViewCommand
-Arguments: `default`.`explain_view`, SELECT key, val FROM explain_temp1, false, false, PersistedView, true
+Arguments: `spark_catalog`.`default`.`explain_view`, SELECT key, val FROM explain_temp1, false, false, PersistedView, true
 
 (3) LogicalRelation
-Arguments: parquet, [key#x, val#x], `default`.`explain_temp1`, false
+Arguments: parquet, [key#x, val#x], `spark_catalog`.`default`.`explain_temp1`, false
 
 (4) SubqueryAlias
 Arguments: spark_catalog.default.explain_temp1
@@ -876,10 +896,10 @@ struct<plan:string>
 +- Exchange (4)
    +- * HashAggregate (3)
       +- * ColumnarToRow (2)
-         +- Scan parquet default.explain_temp1 (1)
+         +- Scan parquet spark_catalog.default.explain_temp1 (1)
 
 
-(1) Scan parquet default.explain_temp1
+(1) Scan parquet spark_catalog.default.explain_temp1
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp1]
@@ -920,10 +940,10 @@ ObjectHashAggregate (5)
 +- Exchange (4)
    +- ObjectHashAggregate (3)
       +- * ColumnarToRow (2)
-         +- Scan parquet default.explain_temp4 (1)
+         +- Scan parquet spark_catalog.default.explain_temp4 (1)
 
 
-(1) Scan parquet default.explain_temp4
+(1) Scan parquet spark_catalog.default.explain_temp4
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp4]
@@ -966,10 +986,10 @@ SortAggregate (7)
       +- SortAggregate (4)
          +- * Sort (3)
             +- * ColumnarToRow (2)
-               +- Scan parquet default.explain_temp4 (1)
+               +- Scan parquet spark_catalog.default.explain_temp4 (1)
 
 
-(1) Scan parquet default.explain_temp4
+(1) Scan parquet spark_catalog.default.explain_temp4
 Output [2]: [key#x, val#x]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/explain_temp4]
@@ -1006,6 +1026,38 @@ Results [2]: [key#x, min(val#x)#x AS min(val)#x]
 
 
 -- !query
+EXPLAIN EXTENDED INSERT INTO TABLE explain_temp5 SELECT * FROM explain_temp4
+-- !query schema
+struct<plan:string>
+-- !query output
+== Parsed Logical Plan ==
+'InsertIntoStatement 'UnresolvedRelation [explain_temp5], [], false, false, false, false
++- 'Project [*]
+   +- 'UnresolvedRelation [explain_temp4], [], false
+
+== Analyzed Logical Plan ==
+InsertIntoHadoopFsRelationCommand file:[not included in comparison]/{warehouse_dir}/explain_temp5, false, [val#x], Parquet, [path=file:[not included in comparison]/{warehouse_dir}/explain_temp5], Append, `spark_catalog`.`default`.`explain_temp5`, org.apache.spark.sql.execution.datasources.CatalogFileIndex(file:[not included in comparison]/{warehouse_dir}/explain_temp5), [key, val]
++- Project [key#x, val#x]
+   +- SubqueryAlias spark_catalog.default.explain_temp4
+      +- Relation spark_catalog.default.explain_temp4[key#x,val#x] parquet
+
+== Optimized Logical Plan ==
+InsertIntoHadoopFsRelationCommand file:[not included in comparison]/{warehouse_dir}/explain_temp5, false, [val#x], Parquet, [path=file:[not included in comparison]/{warehouse_dir}/explain_temp5], Append, `spark_catalog`.`default`.`explain_temp5`, org.apache.spark.sql.execution.datasources.CatalogFileIndex(file:[not included in comparison]/{warehouse_dir}/explain_temp5), [key, val]
++- WriteFiles
+   +- Sort [val#x ASC NULLS FIRST], false
+      +- Project [key#x, empty2null(val#x) AS val#x]
+         +- Relation spark_catalog.default.explain_temp4[key#x,val#x] parquet
+
+== Physical Plan ==
+Execute InsertIntoHadoopFsRelationCommand file:[not included in comparison]/{warehouse_dir}/explain_temp5, false, [val#x], Parquet, [path=file:[not included in comparison]/{warehouse_dir}/explain_temp5], Append, `spark_catalog`.`default`.`explain_temp5`, org.apache.spark.sql.execution.datasources.CatalogFileIndex(file:[not included in comparison]/{warehouse_dir}/explain_temp5), [key, val]
++- WriteFiles
+   +- *Sort [val#x ASC NULLS FIRST], false, 0
+      +- *Project [key#x, empty2null(val#x) AS val#x]
+         +- *ColumnarToRow
+            +- FileScan parquet spark_catalog.default.explain_temp4[key#x,val#x] Batched: true, DataFilters: [], Format: Parquet, Location [not included in comparison]/{warehouse_dir}/explain_temp4], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<key:int,val:string>
+
+
+-- !query
 DROP TABLE explain_temp1
 -- !query schema
 struct<>
@@ -1038,6 +1090,14 @@ struct<>
 
 
 -- !query
+DROP TABLE explain_temp5
+-- !query schema
+struct<>
+-- !query output
+
+
+
+-- !query
 CREATE table  t(v array<string>) USING PARQUET
 -- !query schema
 struct<>
@@ -1053,7 +1113,7 @@ struct<plan:string>
 == Physical Plan ==
 *Filter v#x IN ([a],null)
 +- *ColumnarToRow
-   +- FileScan parquet default.t[v#x] Batched: true, DataFilters: [v#x IN ([a],null)], Format: Parquet, Location [not included in comparison]/{warehouse_dir}/t], PartitionFilters: [], PushedFilters: [In(v, [[a],null])], ReadSchema: struct<v:array<string>>
+   +- FileScan parquet spark_catalog.default.t[v#x] Batched: true, DataFilters: [v#x IN ([a],null)], Format: Parquet, Location [not included in comparison]/{warehouse_dir}/t], PartitionFilters: [], PushedFilters: [In(v, [[a],null])], ReadSchema: struct<v:array<string>>
 
 
 -- !query

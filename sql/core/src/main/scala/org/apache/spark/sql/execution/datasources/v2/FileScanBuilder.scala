@@ -70,8 +70,9 @@ abstract class FileScanBuilder(
   }
 
   override def pushFilters(filters: Seq[Expression]): Seq[Expression] = {
+    val (filtersToPush, filtersToRemain) = filters.partition(DataSourceUtils.shouldPushFilter)
     val (partitionFilters, dataFilters) =
-      DataSourceUtils.getPartitionFiltersAndDataFilters(partitionSchema, filters)
+      DataSourceUtils.getPartitionFiltersAndDataFilters(partitionSchema, filtersToPush)
     this.partitionFilters = partitionFilters
     this.dataFilters = dataFilters
     val translatedFilters = mutable.ArrayBuffer.empty[sources.Filter]
@@ -82,7 +83,7 @@ abstract class FileScanBuilder(
       }
     }
     pushedDataFilters = pushDataFilters(translatedFilters.toArray)
-    dataFilters
+    dataFilters ++ filtersToRemain
   }
 
   override def pushedFilters: Array[Predicate] = pushedDataFilters.map(_.toV2)

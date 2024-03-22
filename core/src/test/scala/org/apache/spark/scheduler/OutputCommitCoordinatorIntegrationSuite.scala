@@ -51,14 +51,15 @@ class OutputCommitCoordinatorIntegrationSuite
         sc.parallelize(1 to 4, 2).map(_.toString).saveAsTextFile(tempDir.getAbsolutePath + "/out")
       }
     }.getCause.getMessage
-    assert(e.endsWith("failed; but task commit success, data duplication may happen."))
+    assert(e.contains("failed; but task commit success, data duplication may happen.") &&
+      e.contains("Intentional exception"))
   }
 }
 
 private class ThrowExceptionOnFirstAttemptOutputCommitter extends FileOutputCommitter {
   override def commitTask(context: TaskAttemptContext): Unit = {
     val ctx = TaskContext.get()
-    if (ctx.attemptNumber < 1) {
+    if (ctx.attemptNumber() < 1) {
       throw new java.io.FileNotFoundException("Intentional exception")
     }
     super.commitTask(context)

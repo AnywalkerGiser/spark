@@ -37,6 +37,7 @@ import org.scalatest.concurrent.Eventually
 import org.scalatest.matchers.must.Matchers._
 
 import org.apache.spark.TestUtils._
+import org.apache.spark.executor.ExecutorExitCode
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Tests._
 import org.apache.spark.internal.config.UI._
@@ -46,6 +47,7 @@ import org.apache.spark.resource.TestResourceIDs._
 import org.apache.spark.scheduler.{SparkListener, SparkListenerExecutorMetricsUpdate, SparkListenerJobStart, SparkListenerTaskEnd, SparkListenerTaskStart}
 import org.apache.spark.shuffle.FetchFailedException
 import org.apache.spark.util.{ThreadUtils, Utils}
+import org.apache.spark.util.ArrayImplicits._
 
 class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventually {
 
@@ -125,7 +127,7 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
         sc = new SparkContext(new SparkConf().setAppName("test").setMaster("local"))
         sc.addFile(file1.getAbsolutePath)
         sc.addFile(relativePath)
-        sc.parallelize(Array(1), 1).map(x => {
+        sc.parallelize(Array(1).toImmutableArraySeq, 1).map(x => {
           val gotten1 = new File(SparkFiles.get(file1.getName))
           val gotten2 = new File(SparkFiles.get(file2.getName))
           if (!gotten1.exists()) {
@@ -195,7 +197,7 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
         sc.addArchive(s"${zipFile.getAbsolutePath}#bar")
         sc.addArchive(relativePath2)
 
-        sc.parallelize(Array(1), 1).map { x =>
+        sc.parallelize(Array(1).toImmutableArraySeq, 1).map { x =>
           val gotten1 = new File(SparkFiles.get(jarFile.getName))
           val gotten2 = new File(SparkFiles.get(zipFile.getName))
           val gotten3 = new File(SparkFiles.get("foo"))
@@ -275,8 +277,8 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
           sc.addJar(badURL)
         }
         assert(e2.getMessage.contains(badURL))
-        assert(sc.addedFiles.isEmpty)
-        assert(sc.addedJars.isEmpty)
+        assert(sc.allAddedFiles.isEmpty)
+        assert(sc.allAddedJars.isEmpty)
       }
     } finally {
       sc.stop()
@@ -293,7 +295,7 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
       try {
         sc = new SparkContext(new SparkConf().setAppName("test").setMaster("local"))
         sc.addFile(neptune.getAbsolutePath, true)
-        sc.parallelize(Array(1), 1).map(x => {
+        sc.parallelize(Array(1).toImmutableArraySeq, 1).map(x => {
           val sep = File.separator
           if (!new File(SparkFiles.get(neptune.getName + sep + alien1.getName)).exists()) {
             throw new SparkException("can't access file under root added directory")
@@ -625,6 +627,18 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
     }
   }
 
+  test("SPARK-43782: conf to override log level") {
+    sc = new SparkContext(new SparkConf().setAppName("test").setMaster("local")
+      .set(SPARK_LOG_LEVEL, "ERROR"))
+    assert(LogManager.getRootLogger().getLevel === Level.ERROR)
+    sc.stop()
+
+    sc = new SparkContext(new SparkConf().setAppName("test").setMaster("local")
+      .set(SPARK_LOG_LEVEL, "TRACE"))
+    assert(LogManager.getRootLogger().getLevel === Level.TRACE)
+    sc.stop()
+  }
+
   test("register and deregister Spark listener from SparkContext") {
     sc = new SparkContext(new SparkConf().setAppName("test").setMaster("local"))
     val sparkListener1 = new SparkListener { }
@@ -839,8 +853,8 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
     sc.addSparkListener(listener)
     sc.range(0, 2).groupBy((x: Long) => x % 2, 2).map { case (x, _) =>
       val context = org.apache.spark.TaskContext.get()
-      if (context.stageAttemptNumber == 0) {
-        if (context.partitionId == 0) {
+      if (context.stageAttemptNumber() == 0) {
+        if (context.partitionId() == 0) {
           // Make the first task in the first stage attempt fail.
           throw new FetchFailedException(SparkEnv.get.blockManager.blockManagerId, 0, 0L, 0, 0,
             new java.io.IOException("fake"))
@@ -944,7 +958,7 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
       sc = new SparkContext(conf)
     }.getMessage()
 
-    assert(error.contains("No executor resource configs were not specified for the following " +
+    assert(error.contains("No executor resource configs were specified for the following " +
       "task configs: gpu"))
   }
 
@@ -1228,7 +1242,7 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
         sc.addFile(fileUrl1)
         sc.addJar(jar2.toString)
         sc.addFile(file2.toString)
-        sc.parallelize(Array(1), 1).map { x =>
+        sc.parallelize(Array(1).toImmutableArraySeq, 1).map { x =>
           val gottenJar1 = new File(SparkFiles.get(jar1.getName))
           if (!gottenJar1.exists()) {
             throw new SparkException("file doesn't exist : " + jar1)
@@ -1353,6 +1367,58 @@ class SparkContextSuite extends SparkFunSuite with LocalSparkContext with Eventu
       new SparkContext(conf)
     }.getMessage
     assert(msg.contains("Cannot use the keyword 'proxy' or 'history' in reverse proxy URL"))
+  }
+
+  test("SPARK-39957: ExitCode HEARTBEAT_FAILURE should be counted as network failure") {
+    // This test is used to prove that driver will receive executorExitCode before onDisconnected
+    // removes the executor. If the executor is removed by onDisconnected, the executor loss will be
+    // considered as a task failure. Spark will throw a SparkException because TASK_MAX_FAILURES is
+    // 1. On the other hand, driver removes executor with exitCode HEARTBEAT_FAILURE, the loss
+    // should be counted as network failure, and thus the job should not throw SparkException.
+
+    val conf = new SparkConf().set(TASK_MAX_FAILURES, 1)
+    val sc = new SparkContext("local-cluster[1, 1, 1024]", "test-exit-code-heartbeat", conf)
+    val result = sc.parallelize(1 to 10, 1).map { x =>
+      val context = org.apache.spark.TaskContext.get()
+      if (context.taskAttemptId() == 0) {
+        System.exit(ExecutorExitCode.HEARTBEAT_FAILURE)
+      } else {
+        x
+      }
+    }.count()
+    assert(result == 10L)
+    sc.stop()
+  }
+
+  test("SPARK-39957: ExitCode HEARTBEAT_FAILURE will be counted as task failure when" +
+    "EXECUTOR_REMOVE_DELAY is disabled") {
+    // If the executor is removed by onDisconnected, the executor loss will be considered as a task
+    // failure. Spark will throw a SparkException because TASK_MAX_FAILURES is 1.
+
+    val conf = new SparkConf().set(TASK_MAX_FAILURES, 1).set(EXECUTOR_REMOVE_DELAY.key, "0s")
+    val sc = new SparkContext("local-cluster[1, 1, 1024]", "test-exit-code-heartbeat", conf)
+    eventually(timeout(30.seconds), interval(1.seconds)) {
+      val e = intercept[SparkException] {
+        sc.parallelize(1 to 10, 1).map { x =>
+          val context = org.apache.spark.TaskContext.get()
+          if (context.taskAttemptId() == 0) {
+            System.exit(ExecutorExitCode.HEARTBEAT_FAILURE)
+          } else {
+            x
+          }
+        }.count()
+      }
+      assert(e.getMessage.contains("Remote RPC client disassociated"))
+    }
+    sc.stop()
+  }
+
+  test("SPARK-42689: ShuffleDataIO initialized after application id has been configured") {
+    val conf = new SparkConf().setAppName("test").setMaster("local")
+    // TestShuffleDataIO will validate if application id has been configured in its constructor
+    conf.set(SHUFFLE_IO_PLUGIN_CLASS.key, classOf[TestShuffleDataIOWithMockedComponents].getName)
+    sc = new SparkContext(conf)
+    sc.stop()
   }
 }
 

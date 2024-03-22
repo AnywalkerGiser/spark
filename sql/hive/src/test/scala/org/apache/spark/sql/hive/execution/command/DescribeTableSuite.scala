@@ -18,6 +18,7 @@
 package org.apache.spark.sql.hive.execution.command
 
 import org.apache.spark.sql.{QueryTest, Row}
+import org.apache.spark.sql.connector.catalog.CatalogManager.SESSION_CATALOG_NAME
 import org.apache.spark.sql.connector.catalog.TableCatalog
 import org.apache.spark.sql.execution.command.v1
 import org.apache.spark.sql.types.StringType
@@ -57,7 +58,7 @@ class DescribeTableSuite extends v1.DescribeTableSuiteBase with CommandSuiteBase
         ("comment", StringType)))
       QueryTest.checkAnswer(
         // Filter out 'Table Properties' to don't check `transient_lastDdlTime`
-        descriptionDf.filter("col_name != 'Created Time' and col_name != 'Table Properties'"),
+        descriptionDf.filter("!(col_name in ('Created Time', 'Table Properties', 'Created By'))"),
         Seq(
           Row("data", "string", null),
           Row("id", "bigint", null),
@@ -66,11 +67,11 @@ class DescribeTableSuite extends v1.DescribeTableSuiteBase with CommandSuiteBase
           Row("id", "bigint", null),
           Row("", "", ""),
           Row("# Detailed Table Information", "", ""),
+          Row("Catalog", SESSION_CATALOG_NAME, ""),
           Row("Database", "ns", ""),
           Row("Table", "table", ""),
           Row(TableCatalog.PROP_OWNER.capitalize, Utils.getCurrentUserName(), ""),
           Row("Last Access", "UNKNOWN", ""),
-          Row("Created By", "Spark 3.4.0-SNAPSHOT", ""),
           Row("Type", "EXTERNAL", ""),
           Row("Provider", getProvider(), ""),
           Row("Comment", "this is a test table", ""),

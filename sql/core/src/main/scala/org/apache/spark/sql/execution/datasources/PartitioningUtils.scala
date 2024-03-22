@@ -34,11 +34,13 @@ import org.apache.spark.sql.catalyst.analysis.TypeCoercion
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.catalog.ExternalCatalogUtils.getPartitionValueString
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Cast, Literal}
+import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, DateFormatter, DateTimeUtils, TimestampFormatter}
 import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.SchemaUtils
 import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.util.ArrayImplicits._
 
 // TODO: We should tighten up visibility of the classes here once we clean up Hive coupling.
 
@@ -61,7 +63,7 @@ object PartitionSpec {
   val emptySpec = PartitionSpec(StructType(Seq.empty[StructField]), Seq.empty[PartitionPath])
 }
 
-object PartitioningUtils extends SQLConfHelper{
+object PartitioningUtils extends SQLConfHelper {
 
   val timestampPartitionPattern = "yyyy-MM-dd HH:mm:ss[.S]"
 
@@ -342,7 +344,7 @@ object PartitioningUtils extends SQLConfHelper{
     pathFragment.split("/").map { kv =>
       val pair = kv.split("=", 2)
       (unescapePathName(pair(0)), unescapePathName(pair(1)))
-    }
+    }.toImmutableArraySeq
   }
 
   /**
@@ -364,7 +366,7 @@ object PartitioningUtils extends SQLConfHelper{
     }
 
   def getPathFragment(spec: TablePartitionSpec, partitionColumns: Seq[Attribute]): String = {
-    getPathFragment(spec, StructType.fromAttributes(partitionColumns))
+    getPathFragment(spec, DataTypeUtils.fromAttributes(partitionColumns))
   }
 
   /**
@@ -405,7 +407,7 @@ object PartitioningUtils extends SQLConfHelper{
     val distinctPartColNames = pathWithPartitionValues.map(_._2.columnNames).distinct
 
     def groupByKey[K, V](seq: Seq[(K, V)]): Map[K, Iterable[V]] =
-      seq.groupBy { case (key, _) => key }.mapValues(_.map { case (_, value) => value }).toMap
+      seq.groupBy { case (key, _) => key }.transform((_, v) => v.map { case (_, value) => value })
 
     val partColNamesToPaths = groupByKey(pathWithPartitionValues.map {
       case (path, partValues) => partValues.columnNames -> path
@@ -488,10 +490,10 @@ object PartitioningUtils extends SQLConfHelper{
 
     val timestampTry = Try {
       val unescapedRaw = unescapePathName(raw)
-      // the inferred data type is consistent with the default timestamp type
-      val timestampType = conf.timestampType
       // try and parse the date, if no exception occurs this is a candidate to be resolved as
-      // TimestampType or TimestampNTZType
+      // TimestampType or TimestampNTZType. The inference timestamp typ is controlled by the conf
+      // "spark.sql.timestampType".
+      val timestampType = conf.timestampType
       timestampType match {
         case TimestampType => timestampFormatter.parse(unescapedRaw)
         case TimestampNTZType => timestampFormatter.parseWithoutTimeZone(unescapedRaw)
@@ -530,9 +532,12 @@ object PartitioningUtils extends SQLConfHelper{
     case _ if value == DEFAULT_PARTITION_NAME => null
     case NullType => null
     case StringType => UTF8String.fromString(unescapePathName(value))
-    case ByteType | ShortType | IntegerType => Integer.parseInt(value)
+    case ByteType => Integer.parseInt(value).toByte
+    case ShortType => Integer.parseInt(value).toShort
+    case IntegerType => Integer.parseInt(value)
     case LongType => JLong.parseLong(value)
-    case FloatType | DoubleType => JDouble.parseDouble(value)
+    case FloatType => JDouble.parseDouble(value).toFloat
+    case DoubleType => JDouble.parseDouble(value)
     case _: DecimalType => Literal(new JBigDecimal(value)).value
     case DateType =>
       Cast(Literal(value), DateType, Some(zoneId.getId)).eval()
@@ -555,19 +560,28 @@ object PartitioningUtils extends SQLConfHelper{
       partitionColumns: Seq[String],
       caseSensitive: Boolean): Unit = {
 
-    SchemaUtils.checkColumnNameDuplication(
-      partitionColumns, partitionColumns.mkString(", "), caseSensitive)
+    SchemaUtils.checkColumnNameDuplication(partitionColumns, caseSensitive)
 
-    partitionColumnsSchema(schema, partitionColumns).foreach {
-      field => field.dataType match {
-        case _: AtomicType => // OK
-        case _ => throw QueryCompilationErrors.cannotUseDataTypeForPartitionColumnError(field)
+    partitionColumnsSchema(schema, partitionColumns).foreach { field =>
+      if (!canPartitionOn(field.dataType)) {
+        throw QueryCompilationErrors.invalidPartitionColumnDataTypeError(field)
       }
     }
 
     if (partitionColumns.nonEmpty && partitionColumns.size == schema.fields.length) {
       throw QueryCompilationErrors.cannotUseAllColumnsForPartitionColumnsError()
     }
+  }
+
+  /**
+   * Checks whether a given data type can be used as a partition column.
+   */
+  def canPartitionOn(dateType: DataType): Boolean = dateType match {
+    // non default collated strings should not be used as partition columns
+    // as we cannot implement string collation semantic with directory names
+    case st: StringType => st.isDefaultCollation
+    case a: AtomicType => !a.isInstanceOf[VariantType]
+    case _ => false
   }
 
   def partitionColumnsSchema(

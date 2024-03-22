@@ -35,9 +35,9 @@ import org.apache.spark.util.Utils
  *   1. without sbt:
  *      bin/spark-submit --class <this class>
  *        --jars <spark core test jar>,<spark catalyst test jar> <sql core test jar>
- *   2. build/sbt "sql/test:runMain <this class>"
+ *   2. build/sbt "sql/Test/runMain <this class>"
  *   3. generate result:
- *      SPARK_GENERATE_BENCHMARK_FILES=1 build/sbt "sql/test:runMain <this class>"
+ *      SPARK_GENERATE_BENCHMARK_FILES=1 build/sbt "sql/Test/runMain <this class>"
  *      Results will be written to "benchmarks/StateStoreBasicOperationsBenchmark-results.txt".
  * }}}
  */
@@ -80,7 +80,7 @@ object StateStoreBasicOperationsBenchmark extends SqlBasedBenchmark {
 
     runBenchmark("put rows") {
       val numOfRows = Seq(10000)
-      val overwriteRates = Seq(100, 75, 50, 25, 10, 5, 0)
+      val overwriteRates = Seq(100, 50, 10, 0)
 
       numOfRows.foreach { numOfRow =>
         val testData = constructRandomizedTestData(numOfRow,
@@ -114,7 +114,7 @@ object StateStoreBasicOperationsBenchmark extends SqlBasedBenchmark {
 
           val benchmark = new Benchmark(s"putting $numOfRow rows " +
             s"($numOfRowsToOverwrite rows to overwrite - rate $overwriteRate)",
-            numOfRow, minNumIters = 10000, output = output)
+            numOfRow, minNumIters = 1000, output = output)
 
           registerPutBenchmarkCase(benchmark, "In-memory", inMemoryProvider,
             committedInMemoryVersion, rowsToPut)
@@ -153,7 +153,7 @@ object StateStoreBasicOperationsBenchmark extends SqlBasedBenchmark {
 
     runBenchmark("delete rows") {
       val numOfRows = Seq(10000)
-      val nonExistRates = Seq(100, 75, 50, 25, 10, 5, 0)
+      val nonExistRates = Seq(100, 50, 10, 0)
       numOfRows.foreach { numOfRow =>
         val testData = constructRandomizedTestData(numOfRow,
           (1 to numOfRow).map(_ * 1000L).toList, 0)
@@ -187,7 +187,7 @@ object StateStoreBasicOperationsBenchmark extends SqlBasedBenchmark {
           val benchmark = new Benchmark(s"trying to delete $numOfRow rows " +
             s"from $numOfRow rows" +
             s"($numOfRowsNonExist rows are non-existing - rate $nonExistRate)",
-            numOfRow, minNumIters = 10000, output = output)
+            numOfRow, minNumIters = 1000, output = output)
 
           registerDeleteBenchmarkCase(benchmark, "In-memory", inMemoryProvider,
             committedInMemoryVersion, keysToDelete)
@@ -228,7 +228,7 @@ object StateStoreBasicOperationsBenchmark extends SqlBasedBenchmark {
 
     runBenchmark("evict rows") {
       val numOfRows = Seq(10000)
-      val numOfEvictionRates = Seq(100, 75, 50, 25, 10, 5, 0)
+      val numOfEvictionRates = Seq(100, 50, 10, 0)
 
       numOfRows.foreach { numOfRow =>
         val timestampsInMicros = (0L until numOfRow).map(ts => ts * 1000L).toList
@@ -253,7 +253,7 @@ object StateStoreBasicOperationsBenchmark extends SqlBasedBenchmark {
           val benchmark = new Benchmark(s"evicting $numOfRowsToEvict rows " +
             s"(maxTimestampToEvictInMillis: $maxTimestampToEvictInMillis) " +
             s"from $numOfRow rows",
-            numOfRow, minNumIters = 10000, output = output)
+            numOfRow, minNumIters = 1000, output = output)
 
           registerEvictBenchmarkCase(benchmark, "In-memory", inMemoryProvider,
             committedInMemoryVersion, maxTimestampToEvictInMillis, numOfRowsToEvict)
@@ -277,7 +277,7 @@ object StateStoreBasicOperationsBenchmark extends SqlBasedBenchmark {
   }
 
   private def getRows(store: StateStore, keys: Seq[UnsafeRow]): Seq[UnsafeRow] = {
-    keys.map(store.get)
+    keys.map(key => store.get(key))
   }
 
   private def loadInitialData(
@@ -346,7 +346,7 @@ object StateStoreBasicOperationsBenchmark extends SqlBasedBenchmark {
     val provider = new HDFSBackedStateStoreProvider()
     val storeConf = new StateStoreConf(new SQLConf())
     provider.init(
-      storeId, keySchema, valueSchema, 0,
+      storeId, keySchema, valueSchema, 0, useColumnFamilies = false,
       storeConf, new Configuration)
     provider
   }
@@ -361,7 +361,7 @@ object StateStoreBasicOperationsBenchmark extends SqlBasedBenchmark {
     val storeConf = new StateStoreConf(sqlConf)
 
     provider.init(
-      storeId, keySchema, valueSchema, 0,
+      storeId, keySchema, valueSchema, 0, useColumnFamilies = false,
       storeConf, new Configuration)
     provider
   }

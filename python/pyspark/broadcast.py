@@ -24,6 +24,7 @@ import pickle
 from typing import (
     overload,
     Any,
+    BinaryIO,
     Callable,
     Dict,
     Generic,
@@ -35,11 +36,11 @@ from typing import (
     TYPE_CHECKING,
     Union,
 )
-from typing.io import BinaryIO  # type: ignore[import]
 
 from pyspark.java_gateway import local_connect_and_auth
 from pyspark.serializers import ChunkedStream, pickle_protocol
 from pyspark.util import print_exec
+from pyspark.errors import PySparkRuntimeError
 
 if TYPE_CHECKING:
     from pyspark import SparkContext
@@ -58,7 +59,12 @@ def _from_id(bid: int) -> "Broadcast[Any]":
     from pyspark.broadcast import _broadcastRegistry
 
     if bid not in _broadcastRegistry:
-        raise RuntimeError("Broadcast variable '%s' not loaded!" % bid)
+        raise PySparkRuntimeError(
+            error_class="BROADCAST_VARIABLE_NOT_LOADED",
+            message_parameters={
+                "variable": str(bid),
+            },
+        )
     return _broadcastRegistry[bid]
 
 
@@ -70,16 +76,14 @@ class Broadcast(Generic[T]):
 
     Examples
     --------
-    >>> from pyspark.context import SparkContext
-    >>> sc = SparkContext('local', 'test')
-    >>> b = sc.broadcast([1, 2, 3, 4, 5])
+    >>> b = spark.sparkContext.broadcast([1, 2, 3, 4, 5])
     >>> b.value
     [1, 2, 3, 4, 5]
-    >>> sc.parallelize([0, 0]).flatMap(lambda x: b.value).collect()
+    >>> spark.sparkContext.parallelize([0, 0]).flatMap(lambda x: b.value).collect()
     [1, 2, 3, 4, 5, 1, 2, 3, 4, 5]
     >>> b.unpersist()
 
-    >>> large_broadcast = sc.broadcast(range(10000))
+    >>> large_broadcast = spark.sparkContext.broadcast(range(10000))
     """
 
     @overload  # On driver
@@ -99,7 +103,7 @@ class Broadcast(Generic[T]):
     def __init__(self: "Broadcast[Any]", *, sock_file: str):
         ...
 
-    def __init__(
+    def __init__(  # type: ignore[misc]
         self,
         sc: Optional["SparkContext"] = None,
         value: Optional[T] = None,
@@ -149,6 +153,32 @@ class Broadcast(Generic[T]):
                 self._path = path
 
     def dump(self, value: T, f: BinaryIO) -> None:
+        """
+        Write a pickled representation of value to the open file or socket.
+        The protocol pickle is HIGHEST_PROTOCOL.
+
+        Parameters
+        ----------
+        value : T
+            Value to write.
+
+        f : :class:`BinaryIO`
+            File or socket where the pickled value will be stored.
+
+        Examples
+        --------
+        >>> import os
+        >>> import tempfile
+
+        >>> b = spark.sparkContext.broadcast([1, 2, 3, 4, 5])
+
+        Write a pickled representation of `b` to the open temp file.
+
+        >>> with tempfile.TemporaryDirectory(prefix="dump") as d:
+        ...     path = os.path.join(d, "test.txt")
+        ...     with open(path, "wb") as f:
+        ...         b.dump(b.value, f)
+        """
         try:
             pickle.dump(value, f, pickle_protocol)
         except pickle.PickleError:
@@ -160,11 +190,74 @@ class Broadcast(Generic[T]):
         f.close()
 
     def load_from_path(self, path: str) -> T:
+        """
+        Read the pickled representation of an object from the open file and
+        return the reconstituted object hierarchy specified therein.
+
+        Parameters
+        ----------
+        path : str
+            File path where reads the pickled value.
+
+        Returns
+        -------
+        T
+            The object hierarchy specified therein reconstituted
+            from the pickled representation of an object.
+
+        Examples
+        --------
+        >>> import os
+        >>> import tempfile
+
+        >>> b = spark.sparkContext.broadcast([1, 2, 3, 4, 5])
+        >>> c = spark.sparkContext.broadcast(1)
+
+        Read the pickled representation of value from temp file.
+
+        >>> with tempfile.TemporaryDirectory(prefix="load_from_path") as d:
+        ...     path = os.path.join(d, "test.txt")
+        ...     with open(path, "wb") as f:
+        ...         b.dump(b.value, f)
+        ...     c.load_from_path(path)
+        [1, 2, 3, 4, 5]
+        """
         with open(path, "rb", 1 << 20) as f:
             return self.load(f)
 
     def load(self, file: BinaryIO) -> T:
-        # "file" could also be a socket
+        """
+        Read a pickled representation of value from the open file or socket.
+
+        Parameters
+        ----------
+        file : :class:`BinaryIO`
+            File or socket where the pickled value will be read.
+
+        Returns
+        -------
+        T
+            The object hierarchy specified therein reconstituted
+            from the pickled representation of an object.
+
+        Examples
+        --------
+        >>> import os
+        >>> import tempfile
+
+        >>> b = spark.sparkContext.broadcast([1, 2, 3, 4, 5])
+        >>> c = spark.sparkContext.broadcast(1)
+
+        Read the pickled representation of value from the open temp file.
+
+        >>> with tempfile.TemporaryDirectory(prefix="load") as d:
+        ...     path = os.path.join(d, "test.txt")
+        ...     with open(path, "wb") as f:
+        ...         b.dump(b.value, f)
+        ...     with open(path, "rb") as f:
+        ...         c.load(f)
+        [1, 2, 3, 4, 5]
+        """
         gc.disable()
         try:
             return pickle.load(file)
@@ -194,11 +287,22 @@ class Broadcast(Generic[T]):
 
         Parameters
         ----------
-        blocking : bool, optional
-            Whether to block until unpersisting has completed
+        blocking : bool, optional, default False
+            Whether to block until unpersisting has completed.
+
+        Examples
+        --------
+        >>> b = spark.sparkContext.broadcast([1, 2, 3, 4, 5])
+
+        Delete cached copies of this broadcast on the executors
+
+        >>> b.unpersist()
         """
         if self._jbroadcast is None:
-            raise RuntimeError("Broadcast can only be unpersisted in driver")
+            raise PySparkRuntimeError(
+                error_class="INVALID_BROADCAST_OPERATION",
+                message_parameters={"operation": "unpersisted"},
+            )
         self._jbroadcast.unpersist(blocking)
 
     def destroy(self, blocking: bool = False) -> None:
@@ -213,17 +317,31 @@ class Broadcast(Generic[T]):
 
         Parameters
         ----------
-        blocking : bool, optional
-            Whether to block until unpersisting has completed
+        blocking : bool, optional, default False
+            Whether to block until unpersisting has completed.
+
+        Examples
+        --------
+        >>> b = spark.sparkContext.broadcast([1, 2, 3, 4, 5])
+
+        Destroy all data and metadata related to this broadcast variable
+
+        >>> b.destroy()
         """
         if self._jbroadcast is None:
-            raise RuntimeError("Broadcast can only be destroyed in driver")
+            raise PySparkRuntimeError(
+                error_class="INVALID_BROADCAST_OPERATION",
+                message_parameters={"operation": "destroyed"},
+            )
         self._jbroadcast.destroy(blocking)
         os.unlink(self._path)
 
     def __reduce__(self) -> Tuple[Callable[[int], "Broadcast[T]"], Tuple[int]]:
         if self._jbroadcast is None:
-            raise RuntimeError("Broadcast can only be serialized in driver")
+            raise PySparkRuntimeError(
+                error_class="INVALID_BROADCAST_OPERATION",
+                message_parameters={"operation": "serialized"},
+            )
         assert self._pickle_registry is not None
         self._pickle_registry.add(self)
         return _from_id, (self._jbroadcast.id(),)
@@ -246,9 +364,20 @@ class BroadcastPickleRegistry(threading.local):
         self._registry.clear()
 
 
-if __name__ == "__main__":
+def _test() -> None:
     import doctest
+    from pyspark.sql import SparkSession
+    import pyspark.broadcast
 
-    (failure_count, test_count) = doctest.testmod()
+    globs = pyspark.broadcast.__dict__.copy()
+    spark = SparkSession.builder.master("local[4]").appName("broadcast tests").getOrCreate()
+    globs["spark"] = spark
+
+    (failure_count, test_count) = doctest.testmod(pyspark.broadcast, globs=globs)
+    spark.stop()
     if failure_count:
         sys.exit(-1)
+
+
+if __name__ == "__main__":
+    _test()

@@ -24,12 +24,10 @@ import java.util.{Collections, Properties, UUID}
 import java.util.concurrent.TimeUnit
 import javax.security.auth.login.Configuration
 
-import scala.collection.JavaConverters._
 import scala.io.Source
-import scala.util.control.NonFatal
+import scala.jdk.CollectionConverters._
 
 import com.google.common.io.Files
-import kafka.api.Request
 import kafka.server.{HostedPartition, KafkaConfig, KafkaServer}
 import kafka.server.checkpoints.OffsetCheckpointFile
 import kafka.zk.KafkaZkClient
@@ -41,6 +39,7 @@ import org.apache.kafka.clients.producer._
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.config.SaslConfigs
 import org.apache.kafka.common.network.ListenerName
+import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.common.security.auth.SecurityProtocol.{PLAINTEXT, SASL_PLAINTEXT}
 import org.apache.kafka.common.serialization.StringSerializer
 import org.apache.kafka.common.utils.SystemTime
@@ -55,6 +54,7 @@ import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.internal.Logging
 import org.apache.spark.kafka010.KafkaTokenUtil
 import org.apache.spark.util.{SecurityUtils, ShutdownHookManager, Utils}
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * This is a helper class for Kafka test suites. This has the functionality to set up
@@ -70,6 +70,11 @@ class KafkaTestUtils(
 
   private val localHostNameForURI = Utils.localHostNameForURI()
   logInfo(s"Local host name is $localHostNameForURI")
+
+  // MiniKDC uses canonical host name on host part, hence we need to provide canonical host name
+  // on the 'host' part of the principal.
+  private val localCanonicalHostName = Utils.localCanonicalHostName()
+  logInfo(s"Local canonical host name is $localCanonicalHostName")
 
   private var kdc: MiniKdc = _
 
@@ -88,7 +93,7 @@ class KafkaTestUtils(
   private var brokerConf: KafkaConfig = _
 
   private val brokerServiceName = "kafka"
-  private val clientUser = s"client/$localHostNameForURI"
+  private val clientUser = s"client/$localCanonicalHostName"
   private var clientKeytabFile: File = _
 
   // Kafka broker server
@@ -134,30 +139,8 @@ class KafkaTestUtils(
     val kdcDir = Utils.createTempDir()
     val kdcConf = MiniKdc.createConf()
     kdcConf.setProperty(MiniKdc.DEBUG, "true")
-    // The port for MiniKdc service gets selected in the constructor, but will be bound
-    // to it later in MiniKdc.start() -> MiniKdc.initKDCServer() -> KdcServer.start().
-    // In meantime, when some other service might capture the port during this progress, and
-    // cause BindException.
-    // This makes our tests which have dedicated JVMs and rely on MiniKDC being flaky
-    //
-    // https://issues.apache.org/jira/browse/HADOOP-12656 get fixed in Hadoop 2.8.0.
-    //
-    // The workaround here is to periodically repeat this process with a timeout , since we are
-    // using Hadoop 2.7.4 as default.
-    // https://issues.apache.org/jira/browse/SPARK-31631
-    eventually(timeout(60.seconds), interval(1.second)) {
-      try {
-        kdc = new MiniKdc(kdcConf, kdcDir)
-        kdc.start()
-      } catch {
-        case NonFatal(e) =>
-          if (kdc != null) {
-            kdc.stop()
-            kdc = null
-          }
-          throw e
-      }
-    }
+    kdc = new MiniKdc(kdcConf, kdcDir)
+    kdc.start()
     // TODO https://issues.apache.org/jira/browse/SPARK-30037
     // Need to build spark's own MiniKDC and customize krb5.conf like Kafka
     rewriteKrb5Conf()
@@ -202,17 +185,17 @@ class KafkaTestUtils(
     assert(kdcReady, "KDC should be set up beforehand")
     val baseDir = Utils.createTempDir()
 
-    val zkServerUser = s"zookeeper/$localHostNameForURI"
+    val zkServerUser = s"zookeeper/$localCanonicalHostName"
     val zkServerKeytabFile = new File(baseDir, "zookeeper.keytab")
     kdc.createPrincipal(zkServerKeytabFile, zkServerUser)
     logDebug(s"Created keytab file: ${zkServerKeytabFile.getAbsolutePath()}")
 
-    val zkClientUser = s"zkclient/$localHostNameForURI"
+    val zkClientUser = s"zkclient/$localCanonicalHostName"
     val zkClientKeytabFile = new File(baseDir, "zkclient.keytab")
     kdc.createPrincipal(zkClientKeytabFile, zkClientUser)
     logDebug(s"Created keytab file: ${zkClientKeytabFile.getAbsolutePath()}")
 
-    val kafkaServerUser = s"kafka/$localHostNameForURI"
+    val kafkaServerUser = s"kafka/$localCanonicalHostName"
     val kafkaServerKeytabFile = new File(baseDir, "kafka.keytab")
     kdc.createPrincipal(kafkaServerKeytabFile, kafkaServerUser)
     logDebug(s"Created keytab file: ${kafkaServerKeytabFile.getAbsolutePath()}")
@@ -395,7 +378,8 @@ class KafkaTestUtils(
   }
 
   def getAllTopicsAndPartitionSize(): Seq[(String, Int)] = {
-    zkClient.getPartitionsForTopics(zkClient.getAllTopicsInCluster()).mapValues(_.size).toSeq
+    zkClient.getPartitionsForTopics(zkClient.getAllTopicsInCluster())
+      .map { case (k, v) => (k, v.size) }.toSeq
   }
 
   /** Create a Kafka topic and wait until it is propagated to the whole cluster */
@@ -456,6 +440,10 @@ class KafkaTestUtils(
       }
     }
     offsets
+  }
+
+  def sendMessages(msgs: Array[ProducerRecord[String, String]]): Seq[(String, RecordMetadata)] = {
+    sendMessages(msgs.toImmutableArraySeq)
   }
 
   def cleanupLogs(): Unit = {
@@ -532,6 +520,8 @@ class KafkaTestUtils(
     props.put("key.serializer", classOf[StringSerializer].getName)
     // wait for all in-sync replicas to ack sends
     props.put("acks", "all")
+    props.put("partitioner.class",
+      classOf[org.apache.kafka.clients.producer.internals.DefaultPartitioner].getName)
     setAuthenticationConfigIfNeeded(props)
     props
   }
@@ -613,7 +603,7 @@ class KafkaTestUtils(
         .getPartitionInfo(topic, partition) match {
       case Some(partitionState) =>
         zkClient.getLeaderForPartition(new TopicPartition(topic, partition)).isDefined &&
-          Request.isValidBrokerId(partitionState.leader) &&
+          FetchRequest.isValidBrokerId(partitionState.leader) &&
           !partitionState.replicas.isEmpty
 
       case _ =>
@@ -659,9 +649,6 @@ class KafkaTestUtils(
 
     def shutdown(): Unit = {
       factory.shutdown()
-      // The directories are not closed even if the ZooKeeper server is shut down.
-      // Please see ZOOKEEPER-1844, which is fixed in 3.4.6+. It leads to test failures
-      // on Windows if the directory deletion failure throws an exception.
       try {
         Utils.deleteRecursively(snapshotDir)
       } catch {

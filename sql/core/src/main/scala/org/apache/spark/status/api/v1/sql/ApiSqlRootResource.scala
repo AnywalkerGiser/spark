@@ -17,7 +17,7 @@
 
 package org.apache.spark.status.api.v1.sql
 
-import javax.ws.rs.{Path, PathParam}
+import jakarta.ws.rs.{Path, PathParam}
 
 import org.apache.spark.status.api.v1.ApiRequestContext
 
@@ -31,15 +31,4 @@ private[v1] class ApiSqlRootResource extends ApiRequestContext {
   def sqlList(
       @PathParam("appId") appId: String,
       @PathParam("attemptId") attemptId: String): Class[SqlResource] = classOf[SqlResource]
-
-  @Path("applications/{appId}/diagnostics/sql")
-  def sqlDiagnosticsList(
-      @PathParam("appId") appId: String): Class[SQLDiagnosticResource] =
-    classOf[SQLDiagnosticResource]
-
-  @Path("applications/{appId}/{attemptId}/diagnostics/sql")
-  def sqlDiagnosticsList(
-      @PathParam("appId") appId: String,
-      @PathParam("attemptId") attemptId: String): Class[SQLDiagnosticResource] =
-    classOf[SQLDiagnosticResource]
 }

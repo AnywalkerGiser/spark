@@ -17,12 +17,13 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
-import scala.collection
 import scala.collection.mutable
 
+import org.apache.spark.SparkException
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateFunction
 import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
@@ -150,7 +151,7 @@ object NestedColumnAliasing {
 
     // A reference attribute can have multiple aliases for nested fields.
     val attrToAliases =
-      AttributeMap(attributeToExtractValuesAndAliases.mapValues(_.map(_._2)).toSeq)
+      AttributeMap(attributeToExtractValuesAndAliases.transform((_, v) => v.map(_._2)))
 
     plan match {
       case Project(projectList, child) =>
@@ -314,25 +315,6 @@ object NestedColumnAliasing {
   }
 }
 
-object GeneratorUnrequiredChildrenPruning {
-  def unapply(plan: LogicalPlan): Option[LogicalPlan] = plan match {
-    case p @ Project(_, g: Generate) =>
-      val requiredAttrs = p.references ++ g.generator.references
-      val newChild = ColumnPruning.prunedChild(g.child, requiredAttrs)
-      val unrequired = g.generator.references -- p.references
-      val unrequiredIndices = newChild.output.zipWithIndex.filter(t => unrequired.contains(t._1))
-        .map(_._2)
-      if (!newChild.fastEquals(g.child) ||
-        unrequiredIndices.toSet != g.unrequiredChildIndex.toSet) {
-        Some(p.copy(child = g.copy(child = newChild, unrequiredChildIndex = unrequiredIndices)))
-      } else {
-        None
-      }
-    case _ => None
-  }
-}
-
-
 /**
  * This prunes unnecessary nested columns from [[Generate]], or [[Project]] -> [[Generate]]
  */
@@ -452,7 +434,7 @@ object GeneratorNestedColumnAliasing {
 
             // As we change the child of the generator, its output data type must be updated.
             val updatedGeneratorOutput = rewrittenG.generatorOutput
-              .zip(rewrittenG.generator.elementSchema.toAttributes)
+              .zip(toAttributes(rewrittenG.generator.elementSchema))
               .map { case (oldAttr, newAttr) =>
                 newAttr.withExprId(oldAttr.exprId).withName(oldAttr.name)
               }
@@ -473,7 +455,7 @@ object GeneratorNestedColumnAliasing {
 
           case other =>
             // We should not reach here.
-            throw new IllegalStateException(s"Unreasonable plan after optimization: $other")
+            throw SparkException.internalError(s"Unreasonable plan after optimization: $other")
         }
       }
 

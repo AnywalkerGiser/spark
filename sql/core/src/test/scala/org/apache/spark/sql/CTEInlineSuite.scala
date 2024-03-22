@@ -18,7 +18,7 @@
 package org.apache.spark.sql
 
 import org.apache.spark.sql.catalyst.expressions.{And, GreaterThan, LessThan, Literal, Or}
-import org.apache.spark.sql.catalyst.plans.logical.{Filter, Project, RepartitionOperation, WithCTE}
+import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.adaptive._
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.internal.SQLConf
@@ -42,8 +42,13 @@ abstract class CTEInlineSuiteBase
            |select * from v except select * from v
          """.stripMargin)
       checkAnswer(df, Nil)
+
+      val r = df.queryExecution.optimizedPlan.find {
+        case RepartitionByExpression(p, _, None, _) => p.isEmpty
+        case _ => false
+      }
       assert(
-        df.queryExecution.optimizedPlan.exists(_.isInstanceOf[RepartitionOperation]),
+        r.isDefined,
         "Non-deterministic With-CTE with multiple references should be not inlined.")
     }
   }
@@ -270,7 +275,8 @@ abstract class CTEInlineSuiteBase
            |  select * from v2 where c1 > 0 union select * from v2 where c2 > 0
            |)
          """.stripMargin))
-      assert(ex.message.contains("Table or view not found: v1"))
+      checkErrorTableNotFound(ex, "`v1`",
+        ExpectedContext("v1", 29, 30))
     }
   }
 
@@ -481,8 +487,243 @@ abstract class CTEInlineSuiteBase
       }
     }
   }
+
+  test("Make sure CTESubstitution places WithCTE back in the plan correctly.") {
+    withView("t") {
+      Seq((0, 1), (1, 2)).toDF("c1", "c2").createOrReplaceTempView("t")
+
+      // CTE on both sides of join - WithCTE placed over first common parent, i.e., the join.
+      val df1 = sql(
+        s"""
+           |select count(v1.c3), count(v2.c3) from (
+           |  with
+           |  v1 as (
+           |    select c1, c2, rand() c3 from t
+           |  )
+           |  select * from v1
+           |) v1 join (
+           |  with
+           |  v2 as (
+           |    select c1, c2, rand() c3 from t
+           |  )
+           |  select * from v2
+           |) v2 on v1.c1 = v2.c1
+         """.stripMargin)
+      checkAnswer(df1, Row(2, 2) :: Nil)
+      df1.queryExecution.analyzed match {
+        case Aggregate(_, _, WithCTE(_, cteDefs)) => assert(cteDefs.length == 2)
+        case other => fail(s"Expect pattern Aggregate(WithCTE(_)) but got $other")
+      }
+
+      // CTE on one side of join - WithCTE placed back where it was.
+      val df2 = sql(
+        s"""
+           |select count(v1.c3), count(v2.c3) from (
+           |  select c1, c2, rand() c3 from t
+           |) v1 join (
+           |  with
+           |  v2 as (
+           |    select c1, c2, rand() c3 from t
+           |  )
+           |  select * from v2
+           |) v2 on v1.c1 = v2.c1
+         """.stripMargin)
+      checkAnswer(df2, Row(2, 2) :: Nil)
+      df2.queryExecution.analyzed match {
+        case Aggregate(_, _, Join(_, SubqueryAlias(_, WithCTE(_, cteDefs)), _, _, _)) =>
+          assert(cteDefs.length == 1)
+        case other => fail(s"Expect pattern Aggregate(Join(_, WithCTE(_))) but got $other")
+      }
+
+      // CTE on one side of join and both sides of union - WithCTE placed on first common parent.
+      val df3 = sql(
+        s"""
+           |select count(v1.c3), count(v2.c3) from (
+           |  select c1, c2, rand() c3 from t
+           |) v1 join (
+           |  select * from (
+           |    with
+           |    v1 as (
+           |      select c1, c2, rand() c3 from t
+           |    )
+           |    select * from v1
+           |  )
+           |  union all
+           |  select * from (
+           |    with
+           |    v2 as (
+           |      select c1, c2, rand() c3 from t
+           |    )
+           |    select * from v2
+           |  )
+           |) v2 on v1.c1 = v2.c1
+         """.stripMargin)
+      checkAnswer(df3, Row(4, 4) :: Nil)
+      df3.queryExecution.analyzed match {
+        case Aggregate(_, _, Join(_, SubqueryAlias(_, WithCTE(_: Union, cteDefs)), _, _, _)) =>
+          assert(cteDefs.length == 2)
+        case other => fail(
+          s"Expect pattern Aggregate(Join(_, (WithCTE(Union(_, _))))) but got $other")
+      }
+
+      // CTE on one side of join and one side of union - WithCTE placed back where it was.
+      val df4 = sql(
+        s"""
+           |select count(v1.c3), count(v2.c3) from (
+           |  select c1, c2, rand() c3 from t
+           |) v1 join (
+           |  select * from (
+           |    with
+           |    v1 as (
+           |      select c1, c2, rand() c3 from t
+           |    )
+           |    select * from v1
+           |  )
+           |  union all
+           |  select c1, c2, rand() c3 from t
+           |) v2 on v1.c1 = v2.c1
+         """.stripMargin)
+      checkAnswer(df4, Row(4, 4) :: Nil)
+      df4.queryExecution.analyzed match {
+        case Aggregate(_, _, Join(_, SubqueryAlias(_, Union(children, _, _)), _, _, _))
+          if children.head.find(_.isInstanceOf[WithCTE]).isDefined =>
+          assert(
+            children.head.collect {
+              case w: WithCTE => w
+            }.head.cteDefs.length == 1)
+        case other => fail(
+          s"Expect pattern Aggregate(Join(_, (WithCTE(Union(_, _))))) but got $other")
+      }
+
+      // CTE on both sides of join and one side of union - WithCTE placed on first common parent.
+      val df5 = sql(
+        s"""
+           |select count(v1.c3), count(v2.c3) from (
+           |  with
+           |  v1 as (
+           |    select c1, c2, rand() c3 from t
+           |  )
+           |  select * from v1
+           |) v1 join (
+           |  select c1, c2, rand() c3 from t
+           |  union all
+           |  select * from (
+           |    with
+           |    v2 as (
+           |      select c1, c2, rand() c3 from t
+           |    )
+           |    select * from v2
+           |  )
+           |) v2 on v1.c1 = v2.c1
+         """.stripMargin)
+      checkAnswer(df5, Row(4, 4) :: Nil)
+      df5.queryExecution.analyzed match {
+        case Aggregate(_, _, WithCTE(_, cteDefs)) => assert(cteDefs.length == 2)
+        case other => fail(s"Expect pattern Aggregate(WithCTE(_)) but got $other")
+      }
+
+      // CTE as root node - WithCTE placed back where it was.
+      val df6 = sql(
+        s"""
+           |with
+           |v1 as (
+           |  select c1, c2, rand() c3 from t
+           |)
+           |select count(v1.c3), count(v2.c3) from
+           |v1 join (
+           |  with
+           |  v2 as (
+           |    select c1, c2, rand() c3 from t
+           |  )
+           |  select * from v2
+           |) v2 on v1.c1 = v2.c1
+         """.stripMargin)
+      checkAnswer(df6, Row(2, 2) :: Nil)
+      df6.queryExecution.analyzed match {
+        case WithCTE(_, cteDefs) => assert(cteDefs.length == 2)
+        case other => fail(s"Expect pattern WithCTE(_) but got $other")
+      }
+    }
+  }
+
+  test("SPARK-44934: CTE column pruning handles duplicate exprIds in CTE") {
+    withTempView("t") {
+      Seq((0, 1, 2), (1, 2, 3)).toDF("c1", "c2", "c3").createOrReplaceTempView("t")
+      val query =
+        """
+          |with cte as (
+          |  select c1, c1, c2, c3 from t where random() > 0
+          |)
+          |select cte.c1, cte2.c1, cte.c2, cte2.c3 from
+          |  (select c1, c2 from cte) cte
+          |    inner join
+          |  (select c1, c3 from cte) cte2
+          |    on cte.c1 = cte2.c1
+          """.stripMargin
+
+      val df = sql(query)
+      checkAnswer(df, Row(0, 0, 1, 2) :: Row(1, 1, 2, 3) :: Nil)
+      assert(
+        df.queryExecution.analyzed.collect {
+          case WithCTE(_, cteDefs) => cteDefs
+        }.head.length == 1,
+        "With-CTE should contain 1 CTE def after analysis.")
+      val cteRepartitions = df.queryExecution.optimizedPlan.collect {
+        case r: RepartitionOperation => r
+      }
+      assert(cteRepartitions.length == 2,
+        "CTE should not be inlined after optimization.")
+      assert(cteRepartitions.head.collectFirst {
+        case p: Project if p.projectList.length == 4 => p
+      }.isDefined, "CTE columns should not be pruned.")
+    }
+  }
+
+  test("SPARK-45752: Unreferenced CTE should all be checked by CheckAnalysis0") {
+    val e = intercept[AnalysisException](sql(
+      s"""
+        |with
+        |a as (select * from tab_non_exists),
+        |b as (select * from a)
+        |select 2
+        |""".stripMargin))
+    checkErrorTableNotFound(e, "`tab_non_exists`", ExpectedContext("tab_non_exists", 26, 39))
+
+    withTable("tab_exists") {
+      spark.sql("CREATE TABLE tab_exists(id INT) using parquet")
+      val e = intercept[AnalysisException](sql(
+        s"""
+           |with
+           |a as (select * from tab_exists),
+           |b as (select * from a),
+           |c as (select * from tab_non_exists),
+           |d as (select * from c)
+           |select 2
+           |""".stripMargin))
+      checkErrorTableNotFound(e, "`tab_non_exists`", ExpectedContext("tab_non_exists", 83, 96))
+    }
+  }
 }
 
 class CTEInlineSuiteAEOff extends CTEInlineSuiteBase with DisableAdaptiveExecutionSuite
 
-class CTEInlineSuiteAEOn extends CTEInlineSuiteBase with EnableAdaptiveExecutionSuite
+class CTEInlineSuiteAEOn extends CTEInlineSuiteBase with EnableAdaptiveExecutionSuite {
+  import testImplicits._
+
+  test("SPARK-40105: Improve repartition in ReplaceCTERefWithRepartition") {
+    withTempView("t") {
+      Seq((0, 1), (1, 2)).toDF("c1", "c2").createOrReplaceTempView("t")
+      val df = sql(
+        s"""with
+           |v as (
+           |  select /*+ rebalance(c1) */ c1, c2, rand() from t
+           |)
+           |select * from v except select * from v
+         """.stripMargin)
+      checkAnswer(df, Nil)
+
+      assert(!df.queryExecution.optimizedPlan.exists(_.isInstanceOf[RepartitionOperation]))
+      assert(df.queryExecution.optimizedPlan.exists(_.isInstanceOf[RebalancePartitions]))
+    }
+  }
+}

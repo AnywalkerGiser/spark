@@ -16,7 +16,6 @@
 #
 
 from abc import ABCMeta, abstractmethod
-
 from typing import Any, Generic, Optional, List, Type, TypeVar, TYPE_CHECKING
 
 from pyspark import since
@@ -220,7 +219,11 @@ class JavaParams(JavaWrapper, Params, metaclass=ABCMeta):
                 java_param = self._java_obj.getParam(param.name)
                 # SPARK-14931: Only check set params back to avoid default params mismatch.
                 if self._java_obj.isSet(java_param):
-                    value = _java2py(sc, self._java_obj.getOrDefault(java_param))
+                    java_value = self._java_obj.getOrDefault(java_param)
+                    if param.typeConverter.__name__.startswith("toList"):
+                        value = [_java2py(sc, x) for x in list(java_value)]
+                    else:
+                        value = _java2py(sc, java_value)
                     self._set(**{param.name: value})
                 # SPARK-10931: Temporary fix for params that have a default in Java
                 if self._java_obj.hasDefault(java_param) and not self.isDefined(param):
@@ -264,7 +267,7 @@ class JavaParams(JavaWrapper, Params, metaclass=ABCMeta):
         return self._java_obj
 
     @staticmethod
-    def _from_java(java_stage: "JavaObject") -> "JP":
+    def _from_java(java_stage: "JavaObject") -> "JP":  # type: ignore
         """
         Given a Java object, create and return a Python wrapper of it.
         Used for ML persistence.
@@ -278,10 +281,8 @@ class JavaParams(JavaWrapper, Params, metaclass=ABCMeta):
             """
             parts = clazz.split(".")
             module = ".".join(parts[:-1])
-            m = __import__(module)
-            for comp in parts[1:]:
-                m = getattr(m, comp)
-            return m
+            m = __import__(module, fromlist=[parts[-1]])
+            return getattr(m, parts[-1])
 
         stage_name = java_stage.getClass().getName().replace("org.apache.spark", "pyspark")
         # Generate a default new instance from the stage_name class.
@@ -420,7 +421,6 @@ class JavaModel(JavaTransformer, Model, metaclass=ABCMeta):
         """
         super(JavaModel, self).__init__(java_model)
         if java_model is not None:
-
             # SPARK-10931: This is a temporary fix to allow models to own params
             # from estimators. Eventually, these params should be in models through
             # using common base classes between estimators and models.
@@ -447,7 +447,7 @@ class JavaPredictionModel(PredictionModel[T], JavaModel, _PredictorParams):
     (Private) Java Model for prediction tasks (regression and classification).
     """
 
-    @property  # type: ignore[misc]
+    @property
     @since("2.1.0")
     def numFeatures(self) -> int:
         """

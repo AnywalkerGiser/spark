@@ -17,17 +17,15 @@
 
 package org.apache.spark.sql.errors
 
-import java.util.Locale
-
-import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
-import org.apache.spark.sql.catalyst.util.{quoteIdentifier, toPrettySQL}
+import org.apache.spark.sql.catalyst.util.toPrettySQL
 import org.apache.spark.sql.types.{DataType, DoubleType, FloatType}
 
 /**
  * The trait exposes util methods for preparing error messages such as quoting of error elements.
  * All classes that extent `QueryErrorsBase` shall follow the rules:
- * 1. Any values shall be outputted in the SQL standard style by using `toSQLValue()`.
+ * 1. Any values shall be outputted in the SQL standard style by usi
+ * ng `toSQLValue()`.
  *   For example: 'a string value', 1, NULL.
  * 2. SQL types shall be double quoted and outputted in the upper case using `toSQLType()`.
  *   For example: "INT", "DECIMAL(10,0)".
@@ -43,7 +41,20 @@ import org.apache.spark.sql.types.{DataType, DoubleType, FloatType}
  * 7. SQL expressions shall be wrapped by double quotes.
  *   For example: "earnings + 1".
  */
-private[sql] trait QueryErrorsBase {
+private[sql] trait QueryErrorsBase extends DataTypeErrorsBase {
+
+  def toSQLConfVal(conf: String): String = {
+    quoteByDefault(conf)
+  }
+
+  def toDSOption(option: String): String = {
+    quoteByDefault(option)
+  }
+
+  def toSQLExpr(e: Expression): String = {
+    quoteByDefault(toPrettySQL(e))
+  }
+
   // Converts an error class parameter to its SQL representation
   def toSQLValue(v: Any, t: DataType): String = Literal.create(v, t) match {
     case Literal(null, _) => "NULL"
@@ -60,39 +71,11 @@ private[sql] trait QueryErrorsBase {
     case l => l.sql
   }
 
-  private def quoteByDefault(elem: String): String = {
-    "\"" + elem + "\""
-  }
-
-  def toSQLStmt(text: String): String = {
-    text.toUpperCase(Locale.ROOT)
-  }
-
-  def toSQLId(parts: Seq[String]): String = {
-    parts.map(quoteIdentifier).mkString(".")
-  }
-
-  def toSQLId(parts: String): String = {
-    toSQLId(UnresolvedAttribute.parseAttributeName(parts))
-  }
-
-  def toSQLType(t: DataType): String = {
-    quoteByDefault(t.sql)
-  }
-
-  def toSQLType(text: String): String = {
-    quoteByDefault(text.toUpperCase(Locale.ROOT))
-  }
-
-  def toSQLConf(conf: String): String = {
-    quoteByDefault(conf)
-  }
-
-  def toDSOption(option: String): String = {
-    quoteByDefault(option)
-  }
-
-  def toSQLExpr(e: Expression): String = {
-    quoteByDefault(toPrettySQL(e))
+  def ordinalNumber(i: Int): String = i match {
+    case 0 => "first"
+    case 1 => "second"
+    case 2 => "third"
+    case i => s"${i + 1}th"
   }
 }
+

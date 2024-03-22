@@ -19,21 +19,19 @@ package org.apache.spark.storage
 
 import java.util.Properties
 
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
 import scala.language.implicitConversions
 import scala.reflect.ClassTag
 
-import org.scalatest.BeforeAndAfterEach
 import org.scalatest.time.SpanSugar._
 
 import org.apache.spark.{SparkException, SparkFunSuite, TaskContext, TaskContextImpl}
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.util.ThreadUtils
 
+class BlockInfoManagerSuite extends SparkFunSuite {
 
-class BlockInfoManagerSuite extends SparkFunSuite with BeforeAndAfterEach {
-
-  private implicit val ec = ExecutionContext.global
+  private implicit val ec: ExecutionContextExecutor = ExecutionContext.global
   private var blockInfoManager: BlockInfoManager = _
 
   override protected def beforeEach(): Unit = {
@@ -166,6 +164,20 @@ class BlockInfoManagerSuite extends SparkFunSuite with BeforeAndAfterEach {
     }
     assert(!ThreadUtils.awaitResult(losingFuture, 1.seconds))
     assert(blockInfoManager.get("block").get.readerCount === 1)
+  }
+
+  test("lockNewBlockForWriting should not block when keepReadLock is false") {
+    withTaskId(0) {
+      assert(blockInfoManager.lockNewBlockForWriting("block", newBlockInfo()))
+    }
+    val lock1Future = Future {
+      withTaskId(1) {
+        blockInfoManager.lockNewBlockForWriting("block", newBlockInfo(), false)
+      }
+    }
+
+    assert(!ThreadUtils.awaitResult(lock1Future, 1.seconds))
+    assert(blockInfoManager.get("block").get.readerCount === 0)
   }
 
   test("read locks are reentrant") {
@@ -311,7 +323,7 @@ class BlockInfoManagerSuite extends SparkFunSuite with BeforeAndAfterEach {
     withTaskId(0) {
       assert(blockInfoManager.lockNewBlockForWriting("block", newBlockInfo()))
       blockInfoManager.unlock("block")
-      intercept[IllegalStateException] {
+      intercept[SparkException] {
         blockInfoManager.removeBlock("block")
       }
     }
@@ -322,7 +334,7 @@ class BlockInfoManagerSuite extends SparkFunSuite with BeforeAndAfterEach {
       assert(blockInfoManager.lockNewBlockForWriting("block", newBlockInfo()))
       blockInfoManager.unlock("block")
       assert(blockInfoManager.lockForReading("block").isDefined)
-      intercept[IllegalStateException] {
+      intercept[SparkException] {
         blockInfoManager.removeBlock("block")
       }
     }

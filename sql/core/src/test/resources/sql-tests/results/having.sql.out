@@ -34,8 +34,23 @@ SELECT count(k) FROM hav GROUP BY v HAVING v = array(1)
 -- !query schema
 struct<>
 -- !query output
-org.apache.spark.sql.AnalysisException
-cannot resolve '(hav.v = array(1))' due to data type mismatch: differing types in '(hav.v = array(1))' (int and array<int>).; line 1 pos 43
+org.apache.spark.sql.catalyst.ExtendedAnalysisException
+{
+  "errorClass" : "DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES",
+  "sqlState" : "42K09",
+  "messageParameters" : {
+    "left" : "\"INT\"",
+    "right" : "\"ARRAY<INT>\"",
+    "sqlExpr" : "\"(v = array(1))\""
+  },
+  "queryContext" : [ {
+    "objectType" : "",
+    "objectName" : "",
+    "startIndex" : 44,
+    "stopIndex" : 55,
+    "fragment" : "v = array(1)"
+  } ]
+}
 
 
 -- !query
@@ -119,3 +134,21 @@ SELECT c1 FROM VALUES (1, 2) as t(c1, c2) GROUP BY t.c1 HAVING t.c1 = 1
 struct<c1:int>
 -- !query output
 1
+
+
+-- !query
+SELECT k, sum(v) FROM hav GROUP BY k HAVING sum(v) > 2 ORDER BY sum(v)
+-- !query schema
+struct<k:string,sum(v):bigint>
+-- !query output
+three	3
+one	6
+
+
+-- !query
+SELECT k, sum(v) FROM hav GROUP BY k HAVING sum(v) > 2 ORDER BY avg(v)
+-- !query schema
+struct<k:string,sum(v):bigint>
+-- !query output
+one	6
+three	3

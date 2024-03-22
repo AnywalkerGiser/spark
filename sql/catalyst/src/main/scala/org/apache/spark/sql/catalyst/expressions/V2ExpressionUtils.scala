@@ -17,16 +17,22 @@
 
 package org.apache.spark.sql.catalyst.expressions
 
+import java.lang.reflect.{Method, Modifier}
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.catalyst.SQLConfHelper
+import org.apache.spark.sql.catalyst.{InternalRow, SQLConfHelper}
 import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException
+import org.apache.spark.sql.catalyst.encoders.EncoderUtils
+import org.apache.spark.sql.catalyst.expressions.objects.{Invoke, StaticInvoke}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.{FunctionCatalog, Identifier}
 import org.apache.spark.sql.connector.catalog.functions._
-import org.apache.spark.sql.connector.expressions.{BucketTransform, Expression => V2Expression, FieldReference, IdentityTransform, NamedReference, NamedTransform, NullOrdering => V2NullOrdering, SortDirection => V2SortDirection, SortOrder => V2SortOrder, SortValue, Transform}
+import org.apache.spark.sql.connector.catalog.functions.ScalarFunction.MAGIC_METHOD_NAME
+import org.apache.spark.sql.connector.expressions.{BucketTransform, Expression => V2Expression, FieldReference, IdentityTransform, Literal => V2Literal, NamedReference, NamedTransform, NullOrdering => V2NullOrdering, SortDirection => V2SortDirection, SortOrder => V2SortOrder, SortValue, Transform}
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.types._
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * A utility class that converts public connector expressions into Catalyst expressions.
@@ -35,11 +41,11 @@ object V2ExpressionUtils extends SQLConfHelper with Logging {
   import org.apache.spark.sql.connector.catalog.CatalogV2Implicits.MultipartIdentifierHelper
 
   def resolveRef[T <: NamedExpression](ref: NamedReference, plan: LogicalPlan): T = {
-    plan.resolve(ref.fieldNames, conf.resolver) match {
+    plan.resolve(ref.fieldNames.toImmutableArraySeq, conf.resolver) match {
       case Some(namedExpr) =>
         namedExpr.asInstanceOf[T]
       case None =>
-        val name = ref.fieldNames.toSeq.quoted
+        val name = ref.fieldNames.toImmutableArraySeq.quoted
         val outputString = plan.output.map(_.name).mkString(",")
         throw QueryCompilationErrors.cannotResolveAttributeError(name, outputString)
     }
@@ -52,8 +58,11 @@ object V2ExpressionUtils extends SQLConfHelper with Logging {
   /**
    * Converts the array of input V2 [[V2SortOrder]] into their counterparts in catalyst.
    */
-  def toCatalystOrdering(ordering: Array[V2SortOrder], query: LogicalPlan): Seq[SortOrder] = {
-    ordering.map(toCatalyst(_, query).asInstanceOf[SortOrder])
+  def toCatalystOrdering(
+      ordering: Array[V2SortOrder],
+      query: LogicalPlan,
+      funCatalogOpt: Option[FunctionCatalog] = None): Seq[SortOrder] = {
+    ordering.map(toCatalyst(_, query, funCatalogOpt).asInstanceOf[SortOrder]).toImmutableArraySeq
   }
 
   def toCatalyst(
@@ -61,13 +70,16 @@ object V2ExpressionUtils extends SQLConfHelper with Logging {
       query: LogicalPlan,
       funCatalogOpt: Option[FunctionCatalog] = None): Expression =
     toCatalystOpt(expr, query, funCatalogOpt)
-        .getOrElse(throw new AnalysisException(s"$expr is not currently supported"))
+        .getOrElse(throw new AnalysisException(
+          errorClass = "_LEGACY_ERROR_TEMP_3054", messageParameters = Map("expr" -> expr.toString)))
 
   def toCatalystOpt(
       expr: V2Expression,
       query: LogicalPlan,
       funCatalogOpt: Option[FunctionCatalog] = None): Option[Expression] = {
     expr match {
+      case l: V2Literal[_] =>
+        Some(Literal.create(l.value, l.dataType))
       case t: Transform =>
         toCatalystTransformOpt(t, query, funCatalogOpt)
       case SortValue(child, direction, nullOrdering) =>
@@ -77,7 +89,9 @@ object V2ExpressionUtils extends SQLConfHelper with Logging {
       case ref: FieldReference =>
         Some(resolveRef[NamedExpression](ref, query))
       case _ =>
-        throw new AnalysisException(s"$expr is not currently supported")
+        throw new AnalysisException(
+          errorClass = "_LEGACY_ERROR_TEMP_3054",
+          messageParameters = Map("expr" -> expr.toString))
     }
   }
 
@@ -98,18 +112,13 @@ object V2ExpressionUtils extends SQLConfHelper with Logging {
           TransformExpression(bound, resolvedRefs, Some(numBuckets))
         }
       }
-    case NamedTransform(name, refs)
-        if refs.length == 1 && refs.forall(_.isInstanceOf[NamedReference]) =>
-      val resolvedRefs = refs.map(_.asInstanceOf[NamedReference]).map { r =>
-        resolveRef[NamedExpression](r, query)
-      }
+    case NamedTransform(name, args) =>
+      val catalystArgs = args.map(toCatalyst(_, query, funCatalogOpt))
       funCatalogOpt.flatMap { catalog =>
-        loadV2FunctionOpt(catalog, name, resolvedRefs).map { bound =>
-          TransformExpression(bound, resolvedRefs)
+        loadV2FunctionOpt(catalog, name, catalystArgs).map { bound =>
+          TransformExpression(bound, catalystArgs)
         }
       }
-    case _ =>
-      throw new AnalysisException(s"Transform $trans is not currently supported")
   }
 
   private def loadV2FunctionOpt(
@@ -142,5 +151,55 @@ object V2ExpressionUtils extends SQLConfHelper with Logging {
   private def toCatalyst(nullOrdering: V2NullOrdering): NullOrdering = nullOrdering match {
     case V2NullOrdering.NULLS_FIRST => NullsFirst
     case V2NullOrdering.NULLS_LAST => NullsLast
+  }
+
+  def resolveScalarFunction(
+      scalarFunc: ScalarFunction[_],
+      arguments: Seq[Expression]): Expression = {
+    val declaredInputTypes = scalarFunc.inputTypes().toImmutableArraySeq
+    val argClasses = declaredInputTypes.map(EncoderUtils.dataTypeJavaClass)
+    findMethod(scalarFunc, MAGIC_METHOD_NAME, argClasses) match {
+      case Some(m) if Modifier.isStatic(m.getModifiers) =>
+        StaticInvoke(scalarFunc.getClass, scalarFunc.resultType(),
+          MAGIC_METHOD_NAME, arguments, inputTypes = declaredInputTypes,
+          propagateNull = false, returnNullable = scalarFunc.isResultNullable,
+          isDeterministic = scalarFunc.isDeterministic, scalarFunction = Some(scalarFunc))
+      case Some(_) =>
+        val caller = Literal.create(scalarFunc, ObjectType(scalarFunc.getClass))
+        Invoke(caller, MAGIC_METHOD_NAME, scalarFunc.resultType(),
+          arguments, methodInputTypes = declaredInputTypes, propagateNull = false,
+          returnNullable = scalarFunc.isResultNullable,
+          isDeterministic = scalarFunc.isDeterministic)
+      case _ =>
+        // TODO: handle functions defined in Scala too - in Scala, even if a
+        //  subclass do not override the default method in parent interface
+        //  defined in Java, the method can still be found from
+        //  `getDeclaredMethod`.
+        findMethod(scalarFunc, "produceResult", Seq(classOf[InternalRow])) match {
+          case Some(_) =>
+            ApplyFunctionExpression(scalarFunc, arguments)
+          case _ =>
+            throw new AnalysisException(
+              errorClass = "_LEGACY_ERROR_TEMP_3055",
+              messageParameters = Map("scalarFunc" -> scalarFunc.name()))
+        }
+    }
+  }
+
+  /**
+   * Check if the input `fn` implements the given `methodName` with parameter types specified
+   * via `argClasses`.
+   */
+  private def findMethod(
+      fn: BoundFunction,
+      methodName: String,
+      argClasses: Seq[Class[_]]): Option[Method] = {
+    val cls = fn.getClass
+    try {
+      Some(cls.getDeclaredMethod(methodName, argClasses: _*))
+    } catch {
+      case _: NoSuchMethodException =>
+        None
+    }
   }
 }

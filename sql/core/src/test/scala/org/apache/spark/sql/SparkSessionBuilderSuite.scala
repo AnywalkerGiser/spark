@@ -17,11 +17,10 @@
 
 package org.apache.spark.sql
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.apache.hadoop.fs.Path
 import org.apache.logging.log4j.Level
-import org.scalatest.BeforeAndAfterEach
 import org.scalatest.concurrent.Eventually
 import org.scalatest.time.SpanSugar._
 
@@ -31,12 +30,14 @@ import org.apache.spark.internal.config.UI.UI_ENABLED
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.StaticSQLConf._
 import org.apache.spark.sql.util.ExecutionListenerBus
+import org.apache.spark.tags.ExtendedSQLTest
 import org.apache.spark.util.ThreadUtils
 
 /**
  * Test cases for the builder pattern of [[SparkSession]].
  */
-class SparkSessionBuilderSuite extends SparkFunSuite with BeforeAndAfterEach with Eventually {
+@ExtendedSQLTest
+class SparkSessionBuilderSuite extends SparkFunSuite with Eventually {
 
   override def afterEach(): Unit = {
     // This suite should not interfere with the other test suites.
@@ -103,7 +104,7 @@ class SparkSessionBuilderSuite extends SparkFunSuite with BeforeAndAfterEach wit
     SparkSession.clearActiveSession()
     assert(SparkSession.active == session)
     SparkSession.clearDefaultSession()
-    intercept[IllegalStateException](SparkSession.active)
+    intercept[SparkException](SparkSession.active)
     session.stop()
   }
 
@@ -300,7 +301,7 @@ class SparkSessionBuilderSuite extends SparkFunSuite with BeforeAndAfterEach wit
 
     val error = intercept[SparkException] {
       session.range(1).foreach { v =>
-        SparkSession.builder.master("local").getOrCreate()
+        SparkSession.builder().master("local").getOrCreate()
         ()
       }
     }.getMessage()
@@ -312,7 +313,7 @@ class SparkSessionBuilderSuite extends SparkFunSuite with BeforeAndAfterEach wit
     val session = SparkSession.builder().master("local-cluster[3, 1, 1024]").getOrCreate()
 
     session.range(1).foreach { v =>
-      SparkSession.builder.master("local")
+      SparkSession.builder().master("local")
         .config(EXECUTOR_ALLOW_SPARK_CONTEXT.key, true).getOrCreate().stop()
       ()
     }
@@ -569,5 +570,23 @@ class SparkSessionBuilderSuite extends SparkFunSuite with BeforeAndAfterEach wit
     assert(
       !logs.exists(_.contains("spark.sql.ansi.enabled\"")),
       s"'spark.sql.ansi.enabled' existed in:\n${logs.mkString("\n")}")
+  }
+
+  test("SPARK-40163: SparkSession.config(Map)") {
+    val map: Map[String, Any] = Map(
+      "string" -> "",
+      "boolean" -> true,
+      "double" -> 0.0,
+      "long" -> 0L
+    )
+
+    val session = SparkSession.builder()
+      .master("local")
+      .config(map)
+      .getOrCreate()
+
+    for (e <- map) {
+      assert(session.conf.get(e._1) == e._2.toString)
+    }
   }
 }

@@ -45,16 +45,17 @@ the contents that have been read will still be returned.
 To ignore corrupt files while reading data files, you can use:
 
 <div class="codetabs">
+
+<div data-lang="python"  markdown="1">
+{% include_example ignore_corrupt_files python/sql/datasource.py %}
+</div>
+
 <div data-lang="scala"  markdown="1">
 {% include_example ignore_corrupt_files scala/org/apache/spark/examples/sql/SQLDataSourceExample.scala %}
 </div>
 
 <div data-lang="java"  markdown="1">
 {% include_example ignore_corrupt_files java/org/apache/spark/examples/sql/JavaSQLDataSourceExample.java %}
-</div>
-
-<div data-lang="python"  markdown="1">
-{% include_example ignore_corrupt_files python/sql/datasource.py %}
 </div>
 
 <div data-lang="r"  markdown="1">
@@ -69,26 +70,26 @@ from files. Here, missing file really means the deleted file under directory aft
 `DataFrame`. When set to true, the Spark jobs will continue to run when encountering missing files and
 the contents that have been read will still be returned.
 
-### Path Global Filter
+### Path Glob Filter
 
-`pathGlobFilter` is used to only include files with file names matching the pattern.
-The syntax follows <code>org.apache.hadoop.fs.GlobFilter</code>.
-It does not change the behavior of partition discovery.
+`pathGlobFilter` is used to only include files with file names matching the pattern. The syntax follows
+<code>org.apache.hadoop.fs.GlobFilter</code>. It does not change the behavior of partition discovery.
 
 To load files with paths matching a given glob pattern while keeping the behavior of partition discovery,
 you can use:
 
 <div class="codetabs">
+
+<div data-lang="python"  markdown="1">
+{% include_example load_with_path_glob_filter python/sql/datasource.py %}
+</div>
+
 <div data-lang="scala"  markdown="1">
 {% include_example load_with_path_glob_filter scala/org/apache/spark/examples/sql/SQLDataSourceExample.scala %}
 </div>
 
 <div data-lang="java"  markdown="1">
 {% include_example load_with_path_glob_filter java/org/apache/spark/examples/sql/JavaSQLDataSourceExample.java %}
-</div>
-
-<div data-lang="python"  markdown="1">
-{% include_example load_with_path_glob_filter python/sql/datasource.py %}
 </div>
 
 <div data-lang="r"  markdown="1">
@@ -103,16 +104,17 @@ If data source explicitly specifies the `partitionSpec` when `recursiveFileLooku
 To load all files recursively, you can use:
 
 <div class="codetabs">
+
+<div data-lang="python"  markdown="1">
+{% include_example recursive_file_lookup python/sql/datasource.py %}
+</div>
+
 <div data-lang="scala"  markdown="1">
 {% include_example recursive_file_lookup scala/org/apache/spark/examples/sql/SQLDataSourceExample.scala %}
 </div>
 
 <div data-lang="java"  markdown="1">
 {% include_example recursive_file_lookup java/org/apache/spark/examples/sql/JavaSQLDataSourceExample.java %}
-</div>
-
-<div data-lang="python"  markdown="1">
-{% include_example recursive_file_lookup python/sql/datasource.py %}
 </div>
 
 <div data-lang="r"  markdown="1">
@@ -140,16 +142,17 @@ to the Spark session timezone (`spark.sql.session.timeZone`).
 To load files with paths matching a given modified time range, you can use:
 
 <div class="codetabs">
+
+<div data-lang="python"  markdown="1">
+{% include_example load_with_modified_time_filter  python/sql/datasource.py %}
+</div>
+
 <div data-lang="scala"  markdown="1">
 {% include_example load_with_modified_time_filter scala/org/apache/spark/examples/sql/SQLDataSourceExample.scala %}
 </div>
 
 <div data-lang="java"  markdown="1">
 {% include_example load_with_modified_time_filter  java/org/apache/spark/examples/sql/JavaSQLDataSourceExample.java %}
-</div>
-
-<div data-lang="python"  markdown="1">
-{% include_example load_with_modified_time_filter  python/sql/datasource.py %}
 </div>
 
 <div data-lang="r"  markdown="1">

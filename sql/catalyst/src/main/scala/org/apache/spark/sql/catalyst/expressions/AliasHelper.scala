@@ -37,8 +37,7 @@ trait AliasHelper {
     // Find all the aliased expressions in the aggregate list that don't include any actual
     // AggregateExpression or PythonUDF, and create a map from the alias to the expression
     val aliasMap = plan.aggregateExpressions.collect {
-      case a: Alias if a.child.find(e => e.isInstanceOf[AggregateExpression] ||
-        PythonUDF.isGroupedAggPandasUDF(e)).isEmpty =>
+      case a: Alias if a.child.find(_.isInstanceOf[AggregateExpression]).isEmpty =>
         (a.toAttribute, a)
     }
     AttributeMap(aliasMap)
@@ -83,11 +82,16 @@ trait AliasHelper {
     }
   }
 
-  protected def trimAliases(e: Expression): Expression = {
-    e.transformDown {
-      case Alias(child, _) => child
-      case MultiAlias(child, _) => child
+  protected def trimAliases(e: Expression): Expression = e match {
+    // The children of `CreateNamedStruct` may use `Alias` to carry metadata and we should not
+    // trim them.
+    case c: CreateNamedStruct => c.mapChildren {
+      case a: Alias if a.metadata != Metadata.empty => a
+      case other => trimAliases(other)
     }
+    case a @ Alias(child, _) => trimAliases(child)
+    case MultiAlias(child, _) => trimAliases(child)
+    case other => other.mapChildren(trimAliases)
   }
 
   protected def trimNonTopLevelAliases[T <: Expression](e: T): T = {

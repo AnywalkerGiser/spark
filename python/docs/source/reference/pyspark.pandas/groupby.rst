@@ -72,11 +72,15 @@ Computations / Descriptive Stats
    GroupBy.mean
    GroupBy.median
    GroupBy.min
+   GroupBy.nth
+   GroupBy.prod
    GroupBy.rank
+   GroupBy.sem
    GroupBy.std
    GroupBy.sum
    GroupBy.var
    GroupBy.nunique
+   GroupBy.quantile
    GroupBy.size
    GroupBy.diff
    GroupBy.idxmax
@@ -85,7 +89,6 @@ Computations / Descriptive Stats
    GroupBy.bfill
    GroupBy.ffill
    GroupBy.head
-   GroupBy.backfill
    GroupBy.shift
    GroupBy.tail
 

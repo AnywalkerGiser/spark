@@ -35,7 +35,7 @@ if should_skip_kinesis_tests:
     )
 else:
     kinesis_asl_assembly_jar = search_jar(
-        "external/kinesis-asl-assembly",
+        "connector/kinesis-asl-assembly",
         "spark-streaming-kinesis-asl-assembly-",
         "spark-streaming-kinesis-asl-assembly_",
     )
@@ -57,7 +57,6 @@ should_test_kinesis = kinesis_requirement_message is None
 
 
 class PySparkStreamingTestCase(unittest.TestCase):
-
     timeout = 30  # seconds
     duration = 0.5
 

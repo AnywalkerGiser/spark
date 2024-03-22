@@ -21,9 +21,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-import org.junit.Before;
-import org.junit.Test;
-import static org.junit.Assert.assertThrows;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
@@ -31,7 +31,7 @@ public class SparkSubmitOptionParserSuite extends BaseSuite {
 
   private SparkSubmitOptionParser parser;
 
-  @Before
+  @BeforeEach
   public void setUp() {
     parser = spy(new DummyParser());
   }

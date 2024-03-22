@@ -146,7 +146,8 @@ class ConstantFoldingSuite extends PlanTest {
       testRelation
         .select(
           Cast(Literal("2"), IntegerType) + Literal(3) + $"a" as "c1",
-          Coalesce(Seq(TryCast(Literal("abc"), IntegerType).replacement, Literal(3))) as "c2")
+          Coalesce(Seq(
+            Cast(Literal("abc"), IntegerType, evalMode = EvalMode.TRY), Literal(3))) as "c2")
 
     val optimized = Optimize.execute(originalQuery.analyze)
 
@@ -274,7 +275,7 @@ class ConstantFoldingSuite extends PlanTest {
     val originalQuery =
       testRelation
         .select($"a")
-        .where(Size(CreateArray(Seq(AssertTrue(false)))) > 0)
+        .where(Size(CreateArray(Seq(rand(0)))) > 0)
 
     val optimized = Optimize.execute(originalQuery.analyze)
     comparePlans(optimized, originalQuery.analyze)
@@ -335,6 +336,51 @@ class ConstantFoldingSuite extends PlanTest {
     comparePlans(optimized, correctAnswer)
   }
 
+  test("SPARK-40380: InvokeLike should only constant-fold to serializable types") {
+    val serializableObjType = ObjectType(classOf[SerializableBoxedInt])
+    val notSerializableObjType = ObjectType(classOf[NotSerializableBoxedInt])
+
+    val originalQuery =
+      testRelation
+        .select(
+          // SerializableBoxedInt(42).add(1).toNotSerializable().addAsInt($"a")
+          Invoke(
+            Invoke(
+              Invoke(
+                Literal.fromObject(SerializableBoxedInt(42), serializableObjType),
+                "add",
+                serializableObjType,
+                Literal(1) :: Nil
+              ),
+              "toNotSerializable",
+              notSerializableObjType),
+            "addAsInt",
+            IntegerType,
+            $"a" :: Nil).as("c1"))
+
+    val optimized = Optimize.execute(originalQuery.analyze)
+
+    val correctAnswer = originalQuery.analyze
+
+    // If serializable ObjectType is allowed to be constant-folded in the future, this chain can
+    // be optimized into:
+    // val correctAnswer =
+    //   testRelation
+    //     .select(
+    //       // SerializableBoxedInt(43).toNotSerializable().addAsInt($"a")
+    //       Invoke(
+    //         Invoke(
+    //           Literal.fromObject(SerializableBoxedInt(43), serializableObjType),
+    //           "toNotSerializable",
+    //           notSerializableObjType),
+    //         "addAsInt",
+    //         IntegerType,
+    //         $"a" :: Nil).as("c1"))
+    //     .analyze
+
+    comparePlans(optimized, correctAnswer)
+  }
+
   test("SPARK-39106: Correct conditional expression constant folding") {
     val t = LocalRelation.fromExternalRows(
       $"c".double :: Nil,
@@ -369,4 +415,35 @@ class ConstantFoldingSuite extends PlanTest {
       }
     }
   }
+
+  test("SPARK-44527: Replace ScalarSubquery with null if its maxRows is 0") {
+    val emptyRelation = LocalRelation($"a".int)
+    val oneRowRelation = LocalRelation.fromExternalRows(Seq($"a".int), Seq(Row(1)))
+    val nullIntLit = Literal(null, IntegerType)
+
+    comparePlans(
+      Optimize.execute(testRelation.select(ScalarSubquery(emptyRelation).as("o")).analyze),
+      testRelation.select(nullIntLit.as("o")).analyze)
+
+    Seq(EqualTo, LessThan, GreaterThan).foreach { comparison =>
+      comparePlans(
+        Optimize.execute(testRelation
+          .select(comparison($"a", ScalarSubquery(emptyRelation)).as("o")).analyze),
+        testRelation.select(comparison($"a", nullIntLit).as("o")).analyze)
+    }
+
+    val oneRowScalarSubquery = testRelation.select(ScalarSubquery(oneRowRelation).as("o")).analyze
+    comparePlans(
+      Optimize.execute(oneRowScalarSubquery),
+      oneRowScalarSubquery)
+  }
+}
+
+case class SerializableBoxedInt(intVal: Int) {
+  def add(other: Int): SerializableBoxedInt = SerializableBoxedInt(intVal + other)
+  def toNotSerializable(): NotSerializableBoxedInt = new NotSerializableBoxedInt(intVal)
+}
+
+class NotSerializableBoxedInt(intVal: Int) {
+  def addAsInt(other: Int): Int = intVal + other
 }

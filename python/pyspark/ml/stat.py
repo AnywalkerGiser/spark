@@ -16,9 +16,7 @@
 #
 
 import sys
-
 from typing import Optional, Tuple, TYPE_CHECKING
-
 
 from pyspark import since, SparkContext
 from pyspark.ml.common import _java2py, _py2java
@@ -274,28 +272,24 @@ class Summarizer:
     +-----------------------------------+
     |{[1.0,1.0,1.0], 1}                 |
     +-----------------------------------+
-    <BLANKLINE>
     >>> df.select(summarizer.summary(df.features)).show(truncate=False)
     +--------------------------------+
     |aggregate_metrics(features, 1.0)|
     +--------------------------------+
     |{[1.0,1.5,2.0], 2}              |
     +--------------------------------+
-    <BLANKLINE>
     >>> df.select(Summarizer.mean(df.features, df.weight)).show(truncate=False)
     +--------------+
     |mean(features)|
     +--------------+
     |[1.0,1.0,1.0] |
     +--------------+
-    <BLANKLINE>
     >>> df.select(Summarizer.mean(df.features)).show(truncate=False)
     +--------------+
     |mean(features)|
     +--------------+
     |[1.0,1.5,2.0] |
     +--------------+
-    <BLANKLINE>
     """
 
     @staticmethod
@@ -405,8 +399,8 @@ class Summarizer:
         The following metrics are accepted (case sensitive):
          - mean: a vector that contains the coefficient-wise mean.
          - sum: a vector that contains the coefficient-wise sum.
-         - variance: a vector tha contains the coefficient-wise variance.
-         - std: a vector tha contains the coefficient-wise standard deviation.
+         - variance: a vector that contains the coefficient-wise variance.
+         - std: a vector that contains the coefficient-wise standard deviation.
          - count: the count of all vectors seen.
          - numNonzeros: a vector with the number of non-zeros for each coefficients
          - max: the maximum for each coefficient.
@@ -519,7 +513,9 @@ if __name__ == "__main__":
     globs["sc"] = sc
     globs["spark"] = spark
 
-    failure_count, test_count = doctest.testmod(globs=globs, optionflags=doctest.ELLIPSIS)
+    failure_count, test_count = doctest.testmod(
+        globs=globs, optionflags=doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE
+    )
     spark.stop()
     if failure_count:
         sys.exit(-1)

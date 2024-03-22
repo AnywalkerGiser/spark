@@ -260,19 +260,40 @@ def cogrouped_apply_in_pandas_example(spark: SparkSession) -> None:
         [(20000101, 1, "x"), (20000101, 2, "y")],
         ("time", "id", "v2"))
 
-    def asof_join(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
-        return pd.merge_asof(left, right, on="time", by="id")
+    def merge_ordered(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
+        return pd.merge_ordered(left, right)
 
     df1.groupby("id").cogroup(df2.groupby("id")).applyInPandas(
-        asof_join, schema="time int, id int, v1 double, v2 string").show()
-    # +--------+---+---+---+
-    # |    time| id| v1| v2|
-    # +--------+---+---+---+
-    # |20000101|  1|1.0|  x|
-    # |20000102|  1|3.0|  x|
-    # |20000101|  2|2.0|  y|
-    # |20000102|  2|4.0|  y|
-    # +--------+---+---+---+
+        merge_ordered, schema="time int, id int, v1 double, v2 string").show()
+    # +--------+---+---+----+
+    # |    time| id| v1|  v2|
+    # +--------+---+---+----+
+    # |20000101|  1|1.0|   x|
+    # |20000102|  1|3.0|null|
+    # |20000101|  2|2.0|   y|
+    # |20000102|  2|4.0|null|
+    # +--------+---+---+----+
+
+
+def arrow_python_udf_example(spark: SparkSession) -> None:
+    from pyspark.sql.functions import udf
+
+    @udf(returnType='int')  # A default, pickled Python UDF
+    def slen(s):  # type: ignore[no-untyped-def]
+        return len(s)
+
+    @udf(returnType='int', useArrow=True)  # An Arrow Python UDF
+    def arrow_slen(s):  # type: ignore[no-untyped-def]
+        return len(s)
+
+    df = spark.createDataFrame([(1, "John Doe", 21)], ("id", "name", "age"))
+
+    df.select(slen("name"), arrow_slen("name")).show()
+    # +----------+----------------+
+    # |slen(name)|arrow_slen(name)|
+    # +----------+----------------+
+    # |         8|               8|
+    # +----------+----------------+
 
 
 if __name__ == "__main__":

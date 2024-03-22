@@ -22,13 +22,13 @@ import java.util
 
 import org.scalatest.BeforeAndAfter
 
-import org.apache.spark.sql.{AnalysisException, Row}
+import org.apache.spark.sql.{AnalysisException, Row, SaveMode}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException
 import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.streaming.StreamingRelationV2
-import org.apache.spark.sql.connector.{FakeV2Provider, InMemoryTableSessionCatalog}
-import org.apache.spark.sql.connector.catalog.{Identifier, InMemoryTableCatalog, SupportsRead, Table, TableCapability, V2TableWithV1Fallback}
+import org.apache.spark.sql.connector.{FakeV2Provider, FakeV2ProviderWithCustomSchema, InMemoryTableSessionCatalog}
+import org.apache.spark.sql.connector.catalog.{Column, Identifier, InMemoryTableCatalog, MetadataColumn, SupportsMetadataColumns, SupportsRead, Table, TableCapability, V2TableWithV1Fallback}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.connector.read.ScanBuilder
 import org.apache.spark.sql.execution.streaming.{MemoryStream, MemoryStreamScanBuilder, StreamingQueryWrapper}
@@ -36,10 +36,12 @@ import org.apache.spark.sql.functions.lit
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.streaming.StreamTest
 import org.apache.spark.sql.streaming.sources.FakeScanBuilder
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{DataType, IntegerType, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.tags.SlowSQLTest
 import org.apache.spark.util.Utils
 
+@SlowSQLTest
 class DataStreamTableAPISuite extends StreamTest with BeforeAndAfter {
   import testImplicits._
   import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
@@ -75,9 +77,10 @@ class DataStreamTableAPISuite extends StreamTest with BeforeAndAfter {
   }
 
   test("read: read non-exist table") {
-    intercept[AnalysisException] {
+    val e = intercept[AnalysisException] {
       spark.readStream.table("non_exist_table")
-    }.message.contains("Table not found")
+    }
+    checkErrorTableNotFound(e, "`non_exist_table`")
   }
 
   test("read: stream table API with temp view") {
@@ -110,9 +113,16 @@ class DataStreamTableAPISuite extends StreamTest with BeforeAndAfter {
 
     spark.sql(s"CREATE TABLE $tableIdentifier (id bigint, data string) USING foo")
 
-    intercept[AnalysisException] {
-      spark.readStream.table(tableIdentifier)
-    }.message.contains("does not support either micro-batch or continuous scan")
+    checkError(
+      exception = intercept[AnalysisException] {
+        spark.readStream.table(tableIdentifier)
+      },
+      errorClass = "UNSUPPORTED_FEATURE.TABLE_OPERATION",
+      parameters = Map(
+        "tableName" -> "`testcat`.`table_name`",
+        "operation" -> "either micro-batch or continuous scan"
+      )
+    )
   }
 
   test("read: read table with custom catalog") {
@@ -194,7 +204,7 @@ class DataStreamTableAPISuite extends StreamTest with BeforeAndAfter {
   }
 
   test("write: write to table with default session catalog") {
-    val v2Source = classOf[FakeV2Provider].getName
+    val v2Source = classOf[FakeV2ProviderWithCustomSchema].getName
     spark.conf.set(SQLConf.V2_SESSION_CATALOG_IMPLEMENTATION.key,
       classOf[InMemoryTableSessionCatalog].getName)
 
@@ -423,7 +433,7 @@ class DataStreamTableAPISuite extends StreamTest with BeforeAndAfter {
           val explainWithExtended = sq.explainInternal(true)
           // `extended = true` displays 3 logical plans (Parsed/Analyzed/Optimized) and 1 physical
           // plan.
-          assert("StreamingDataSourceV2Relation".r
+          assert("StreamingDataSourceV2ScanRelation".r
             .findAllMatchIn(explainWithExtended).size === 3)
           // WriteToMicroBatchDataSource is used for both parsed and analyzed logical plan
           assert("WriteToMicroBatchDataSource".r
@@ -442,6 +452,71 @@ class DataStreamTableAPISuite extends StreamTest with BeforeAndAfter {
           sq.stop()
         }
       }
+    }
+  }
+
+  test("SPARK-39940: refresh table when streaming query writes to the catalog table via DSv1") {
+    withTable("tbl1", "tbl2") {
+      withTempDir { dir =>
+        val baseTbls = new File(dir, "tables")
+        val tbl1File = new File(baseTbls, "tbl1")
+        val tbl2File = new File(baseTbls, "tbl2")
+        val checkpointLocation = new File(dir, "checkpoint")
+
+        val format = "parquet"
+        Seq((1, 2)).toDF("i", "d")
+          .write.format(format).option("path", tbl1File.getCanonicalPath).saveAsTable("tbl1")
+
+        val query = spark.readStream.format(format).table("tbl1")
+          .writeStream.format(format)
+          .option("checkpointLocation", checkpointLocation.getCanonicalPath)
+          .option("path", tbl2File.getCanonicalPath)
+          .toTable("tbl2")
+
+        try {
+          query.processAllAvailable()
+          checkAnswer(spark.table("tbl2").sort($"i"), Seq(Row(1, 2)))
+
+          Seq((3, 4)).toDF("i", "d")
+            .write.format(format).option("path", tbl1File.getCanonicalPath)
+            .mode(SaveMode.Append).saveAsTable("tbl1")
+
+          query.processAllAvailable()
+          checkAnswer(spark.table("tbl2").sort($"i"), Seq(Row(1, 2), Row(3, 4)))
+
+          assert(query.exception.isEmpty, "No exception should happen in streaming query: " +
+            s"exception - ${query.exception}")
+        } finally {
+          query.stop()
+        }
+      }
+    }
+  }
+
+  test("SPARK-41040: self-union using readStream.table should not fail") {
+    withTable("self_union_table") {
+      spark.range(10).write.format("parquet").saveAsTable("self_union_table")
+      val df = spark.readStream.format("parquet").table("self_union_table")
+      val q = df.union(df).writeStream.format("noop").start()
+      try {
+        q.processAllAvailable()
+      } finally {
+        q.stop()
+      }
+    }
+  }
+
+  test("SPARK-44865: Test StreamingRelationV2 with metadata column") {
+    val tblName = "teststream.table_name"
+    withTable(tblName) {
+      spark.sql(s"CREATE TABLE $tblName (data int) USING foo")
+      val stream = MemoryStream[Int]
+      val testCatalog = spark.sessionState.catalogManager.catalog("teststream").asTableCatalog
+      val table = testCatalog.loadTable(Identifier.of(Array(), "table_name"))
+      table.asInstanceOf[InMemoryStreamTable].setStream(stream)
+      // It will not throw UNRESOLVED_COLUMN exception because
+      // we add metadata column to StreamingRelationV2
+      spark.readStream.table(tblName).select("value", "_seq")
     }
   }
 
@@ -522,7 +597,10 @@ object DataStreamTableAPISuite {
   val V1FallbackTestTableName = "fallbackV1Test"
 }
 
-class InMemoryStreamTable(override val name: String) extends Table with SupportsRead {
+class InMemoryStreamTable(override val name: String)
+  extends Table
+  with SupportsRead
+  with SupportsMetadataColumns {
   var stream: MemoryStream[Int] = _
 
   def setStream(inputData: MemoryStream[Int]): Unit = stream = inputData
@@ -536,6 +614,14 @@ class InMemoryStreamTable(override val name: String) extends Table with Supports
   override def newScanBuilder(options: CaseInsensitiveStringMap): ScanBuilder = {
     new MemoryStreamScanBuilder(stream)
   }
+
+  private object SeqColumn extends MetadataColumn {
+    override def name: String = "_seq"
+    override def dataType: DataType = IntegerType
+    override def comment: String = "Seq"
+  }
+
+  override val metadataColumns: Array[MetadataColumn] = Array(SeqColumn)
 }
 
 class NonStreamV2Table(override val name: String)
@@ -563,11 +649,11 @@ class InMemoryStreamTableCatalog extends InMemoryTableCatalog {
 
   override def createTable(
       ident: Identifier,
-      schema: StructType,
+      columns: Array[Column],
       partitions: Array[Transform],
       properties: util.Map[String, String]): Table = {
     if (tables.containsKey(ident)) {
-      throw new TableAlreadyExistsException(ident)
+      throw new TableAlreadyExistsException(ident.asMultipartIdentifier)
     }
 
     val table = if (ident.name() == DataStreamTableAPISuite.V1FallbackTestTableName) {

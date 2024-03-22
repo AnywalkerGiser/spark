@@ -25,6 +25,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.util.Utils
+import org.apache.spark.util.collection.{Utils => CUtils}
 
 /**
  * Utility functions used by the query planner to convert our plan to new aggregation code path.
@@ -75,10 +76,12 @@ object AggUtils {
       resultExpressions: Seq[NamedExpression] = Nil,
       child: SparkPlan): SparkPlan = {
     val useHash = Aggregate.supportsHashAggregate(
-      aggregateExpressions.flatMap(_.aggregateFunction.aggBufferAttributes))
+      aggregateExpressions.flatMap(_.aggregateFunction.aggBufferAttributes), groupingExpressions)
+
+    val forceObjHashAggregate = forceApplyObjectHashAggregate(child.conf)
     val forceSortAggregate = forceApplySortAggregate(child.conf)
 
-    if (useHash && !forceSortAggregate) {
+    if (useHash && !forceSortAggregate && !forceObjHashAggregate) {
       HashAggregateExec(
         requiredChildDistributionExpressions = requiredChildDistributionExpressions,
         isStreaming = isStreaming,
@@ -93,7 +96,7 @@ object AggUtils {
       val objectHashEnabled = child.conf.useObjectHashAggregation
       val useObjectHash = Aggregate.supportsObjectHashAggregate(aggregateExpressions)
 
-      if (objectHashEnabled && useObjectHash && !forceSortAggregate) {
+      if (forceObjHashAggregate || (objectHashEnabled && useObjectHash && !forceSortAggregate)) {
         ObjectHashAggregateExec(
           requiredChildDistributionExpressions = requiredChildDistributionExpressions,
           isStreaming = isStreaming,
@@ -218,14 +221,17 @@ object AggUtils {
     }
 
     // 3. Create an Aggregate operator for partial aggregation (for distinct)
-    val distinctColumnAttributeLookup = distinctExpressions.zip(distinctAttributes).toMap
+    val distinctColumnAttributeLookup = CUtils.toMap(distinctExpressions.map(_.canonicalized),
+      distinctAttributes)
     val rewrittenDistinctFunctions = functionsWithDistinct.map {
       // Children of an AggregateFunction with DISTINCT keyword has already
       // been evaluated. At here, we need to replace original children
       // to AttributeReferences.
       case agg @ AggregateExpression(aggregateFunction, mode, true, _, _) =>
-        aggregateFunction.transformDown(distinctColumnAttributeLookup)
-          .asInstanceOf[AggregateFunction]
+        aggregateFunction.transformDown {
+          case e: Expression if distinctColumnAttributeLookup.contains(e.canonicalized) =>
+            distinctColumnAttributeLookup(e.canonicalized)
+        }.asInstanceOf[AggregateFunction]
       case agg =>
         throw new IllegalArgumentException(
           "Non-distinct aggregate is found in functionsWithDistinct " +
@@ -365,7 +371,8 @@ object AggUtils {
         groupingAttributes,
         stateInfo = None,
         outputMode = None,
-        eventTimeWatermark = None,
+        eventTimeWatermarkForLateEvents = None,
+        eventTimeWatermarkForEviction = None,
         stateFormatVersion = stateFormatVersion,
         partialMerged2)
 
@@ -422,8 +429,9 @@ object AggUtils {
     }
 
     if (groupWithoutSessionExpression.isEmpty) {
-      throw new AnalysisException("Global aggregation with session window in streaming query" +
-        " is not supported.")
+      throw new AnalysisException(
+        errorClass = "_LEGACY_ERROR_TEMP_3068",
+        messageParameters = Map.empty)
     }
 
     val groupingWithoutSessionAttributes = groupWithoutSessionExpression.map(_.toAttribute)
@@ -468,7 +476,8 @@ object AggUtils {
 
     // shuffle & sort happens here: most of details are also handled in this physical plan
     val restored = SessionWindowStateStoreRestoreExec(groupingWithoutSessionAttributes,
-      sessionExpression.toAttribute, stateInfo = None, eventTimeWatermark = None,
+      sessionExpression.toAttribute, stateInfo = None,
+      eventTimeWatermarkForLateEvents = None, eventTimeWatermarkForEviction = None,
       stateFormatVersion, partialMerged1)
 
     val mergedSessions = {
@@ -497,7 +506,8 @@ object AggUtils {
       sessionExpression.toAttribute,
       stateInfo = None,
       outputMode = None,
-      eventTimeWatermark = None,
+      eventTimeWatermarkForLateEvents = None,
+      eventTimeWatermarkForEviction = None,
       stateFormatVersion, mergedSessions)
 
     val finalAndCompleteAggregate: SparkPlan = {
@@ -580,5 +590,14 @@ object AggUtils {
   private def forceApplySortAggregate(conf: SQLConf): Boolean = {
     Utils.isTesting &&
       conf.getConfString("spark.sql.test.forceApplySortAggregate", "false") == "true"
+  }
+
+  /**
+   * Returns whether a object hash aggregate should be force applied.
+   * The config key is hard-coded because it's testing only and should not be exposed.
+   */
+  private def forceApplyObjectHashAggregate(conf: SQLConf): Boolean = {
+    Utils.isTesting &&
+      conf.getConfString("spark.sql.test.forceApplyObjectHashAggregate", "false") == "true"
   }
 }

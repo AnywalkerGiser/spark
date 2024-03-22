@@ -19,19 +19,20 @@ package org.apache.spark.sql
 
 import java.util.{Locale, Properties}
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.apache.spark.annotation.Stable
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, NoSuchTableException, UnresolvedDBObjectName, UnresolvedRelation}
+import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, NoSuchTableException, UnresolvedIdentifier, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.expressions.Literal
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, CreateTableAsSelect, InsertIntoStatement, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, ReplaceTableAsSelect, TableSpec}
+import org.apache.spark.sql.catalyst.plans.logical.{AppendData, CreateTableAsSelect, InsertIntoStatement, LogicalPlan, OptionList, OverwriteByExpression, OverwritePartitionsDynamic, ReplaceTableAsSelect, UnresolvedTableSpec}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.connector.catalog.{CatalogPlugin, CatalogV2Implicits, CatalogV2Util, Identifier, SupportsCatalogOptions, Table, TableCatalog, TableProvider, V1Table}
 import org.apache.spark.sql.connector.catalog.TableCapability._
 import org.apache.spark.sql.connector.expressions.{FieldReference, IdentityTransform, Transform}
 import org.apache.spark.sql.errors.QueryCompilationErrors
+import org.apache.spark.sql.execution.QueryExecution
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.{CreateTable, DataSource, DataSourceUtils, LogicalRelation}
 import org.apache.spark.sql.execution.datasources.v2._
@@ -39,6 +40,7 @@ import org.apache.spark.sql.internal.SQLConf.PartitionOverwriteMode
 import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * Interface used to write a [[Dataset]] to external storage systems (e.g. file systems,
@@ -86,8 +88,7 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
       case "append" => mode(SaveMode.Append)
       case "ignore" => mode(SaveMode.Ignore)
       case "error" | "errorifexists" | "default" => mode(SaveMode.ErrorIfExists)
-      case _ => throw new IllegalArgumentException(s"Unknown save mode: $saveMode. Accepted " +
-        "save modes are 'overwrite', 'append', 'ignore', 'error', 'errorifexists', 'default'.")
+      case _ => throw QueryCompilationErrors.invalidSaveModeError(saveMode)
     }
   }
 
@@ -261,7 +262,7 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
       val optionsWithPath = getOptionsWithPath(path)
 
-      val finalOptions = sessionOptions.filterKeys(!optionsWithPath.contains(_)).toMap ++
+      val finalOptions = sessionOptions.filter { case (k, _) => !optionsWithPath.contains(k) } ++
         optionsWithPath.originalMap
       val dsOptions = new CaseInsensitiveStringMap(finalOptions.asJava)
 
@@ -326,20 +327,18 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
               val catalog = CatalogV2Util.getTableProviderCatalog(
                 supportsExtract, catalogManager, dsOptions)
 
-              val tableSpec = TableSpec(
+              val tableSpec = UnresolvedTableSpec(
                 properties = Map.empty,
                 provider = Some(source),
-                options = Map.empty,
+                optionExpression = OptionList(Seq.empty),
                 location = extraOptions.get("path"),
                 comment = extraOptions.get(TableCatalog.PROP_COMMENT),
                 serde = None,
                 external = false)
               runCommand(df.sparkSession) {
                 CreateTableAsSelect(
-                  UnresolvedDBObjectName(
-                    catalog.name +: ident.namespace.toSeq :+ ident.name,
-                    isNamespace = false
-                  ),
+                  UnresolvedIdentifier(
+                    catalog.name +: ident.namespace.toImmutableArraySeq :+ ident.name),
                   partitioningAsV2,
                   df.queryExecution.analyzed,
                   tableSpec,
@@ -463,7 +462,7 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
       case SaveMode.Overwrite =>
         val conf = df.sparkSession.sessionState.conf
-        val dynamicPartitionOverwrite = table.table.partitioning.size > 0 &&
+        val dynamicPartitionOverwrite = table.table.partitioning.length > 0 &&
           conf.partitionOverwriteMode == PartitionOverwriteMode.DYNAMIC
 
         if (dynamicPartitionOverwrite) {
@@ -492,7 +491,7 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
   private def getBucketSpec: Option[BucketSpec] = {
     if (sortColumnNames.isDefined && numBuckets.isEmpty) {
-      throw QueryCompilationErrors.sortByNotUsedWithBucketByError()
+      throw QueryCompilationErrors.sortByWithoutBucketingError()
     }
 
     numBuckets.map { n =>
@@ -594,16 +593,16 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
         AppendData.byName(v2Relation, df.logicalPlan, extraOptions.toMap)
 
       case (SaveMode.Overwrite, _) =>
-        val tableSpec = TableSpec(
+        val tableSpec = UnresolvedTableSpec(
           properties = Map.empty,
           provider = Some(source),
-          options = Map.empty,
+          optionExpression = OptionList(Seq.empty),
           location = extraOptions.get("path"),
           comment = extraOptions.get(TableCatalog.PROP_COMMENT),
           serde = None,
           external = false)
         ReplaceTableAsSelect(
-          UnresolvedDBObjectName(nameParts, isNamespace = false),
+          UnresolvedIdentifier(nameParts),
           partitioningAsV2,
           df.queryExecution.analyzed,
           tableSpec,
@@ -614,17 +613,17 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
         // We have a potential race condition here in AppendMode, if the table suddenly gets
         // created between our existence check and physical execution, but this can't be helped
         // in any case.
-        val tableSpec = TableSpec(
+        val tableSpec = UnresolvedTableSpec(
           properties = Map.empty,
           provider = Some(source),
-          options = Map.empty,
+          optionExpression = OptionList(Seq.empty),
           location = extraOptions.get("path"),
           comment = extraOptions.get(TableCatalog.PROP_COMMENT),
           serde = None,
           external = false)
 
         CreateTableAsSelect(
-          UnresolvedDBObjectName(nameParts, isNamespace = false),
+          UnresolvedIdentifier(nameParts),
           partitioningAsV2,
           df.queryExecution.analyzed,
           tableSpec,
@@ -639,17 +638,16 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
 
   private def saveAsTable(tableIdent: TableIdentifier): Unit = {
     val catalog = df.sparkSession.sessionState.catalog
-    val tableExists = catalog.tableExists(tableIdent)
-    val db = tableIdent.database.getOrElse(catalog.getCurrentDatabase)
-    val tableIdentWithDB = tableIdent.copy(database = Some(db))
-    val tableName = tableIdentWithDB.unquotedString
+    val qualifiedIdent = catalog.qualifyIdentifier(tableIdent)
+    val tableExists = catalog.tableExists(qualifiedIdent)
+    val tableName = qualifiedIdent.unquotedString
 
     (tableExists, mode) match {
       case (true, SaveMode.Ignore) =>
         // Do nothing
 
       case (true, SaveMode.ErrorIfExists) =>
-        throw QueryCompilationErrors.tableAlreadyExistsError(tableIdent)
+        throw QueryCompilationErrors.tableAlreadyExistsError(qualifiedIdent)
 
       case (true, SaveMode.Overwrite) =>
         // Get all input data source or hive relations of the query.
@@ -658,25 +656,27 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
           case relation: HiveTableRelation => relation.tableMeta.identifier
         }
 
-        val tableRelation = df.sparkSession.table(tableIdentWithDB).queryExecution.analyzed
+        val tableRelation = df.sparkSession.table(qualifiedIdent).queryExecution.analyzed
         EliminateSubqueryAliases(tableRelation) match {
           // check if the table is a data source table (the relation is a BaseRelation).
           case LogicalRelation(dest: BaseRelation, _, _, _) if srcRelations.contains(dest) =>
-            throw QueryCompilationErrors.cannotOverwriteTableThatIsBeingReadFromError(tableName)
+            throw QueryCompilationErrors.cannotOverwriteTableThatIsBeingReadFromError(
+              qualifiedIdent)
           // check hive table relation when overwrite mode
           case relation: HiveTableRelation
               if srcRelations.contains(relation.tableMeta.identifier) =>
-            throw QueryCompilationErrors.cannotOverwriteTableThatIsBeingReadFromError(tableName)
+            throw QueryCompilationErrors.cannotOverwriteTableThatIsBeingReadFromError(
+              qualifiedIdent)
           case _ => // OK
         }
 
         // Drop the existing table
-        catalog.dropTable(tableIdentWithDB, ignoreIfNotExists = true, purge = false)
-        createTable(tableIdentWithDB)
+        catalog.dropTable(qualifiedIdent, ignoreIfNotExists = true, purge = false)
+        createTable(qualifiedIdent)
         // Refresh the cache of the table in the catalog.
-        catalog.refreshTable(tableIdentWithDB)
+        catalog.refreshTable(qualifiedIdent)
 
-      case _ => createTable(tableIdent)
+      case _ => createTable(qualifiedIdent)
     }
   }
 
@@ -852,11 +852,43 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
   }
 
   /**
+   * Saves the content of the `DataFrame` in XML format at the specified path.
+   * This is equivalent to:
+   * {{{
+   *   format("xml").save(path)
+   * }}}
+   *
+   * Note that writing a XML file from `DataFrame` having a field `ArrayType` with
+   * its element as `ArrayType` would have an additional nested field for the element.
+   * For example, the `DataFrame` having a field below,
+   *
+   *    {@code fieldA [[data1], [data2]]}
+   *
+   * would produce a XML file below.
+   *    {@code
+   *    <fieldA>
+   *        <item>data1</item>
+   *    </fieldA>
+   *    <fieldA>
+   *        <item>data2</item>
+   *    </fieldA>}
+   *
+   * Namely, roundtrip in writing and reading can end up in different schema structure.
+   *
+   * You can find the XML-specific options for writing XML files in
+   * <a href="https://spark.apache.org/docs/latest/sql-data-sources-xml.html#data-source-option">
+   * Data Source Option</a> in the version you use.
+   */
+  def xml(path: String): Unit = {
+    format("xml").save(path)
+  }
+
+  /**
    * Wrap a DataFrameWriter action to track the QueryExecution and time cost, then report to the
    * user-registered callback functions.
    */
   private def runCommand(session: SparkSession)(command: LogicalPlan): Unit = {
-    val qe = session.sessionState.executePlan(command)
+    val qe = new QueryExecution(session, command, df.queryExecution.tracker)
     qe.assertCommandExecuted()
   }
 

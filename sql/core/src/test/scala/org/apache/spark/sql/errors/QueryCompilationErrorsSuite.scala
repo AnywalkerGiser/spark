@@ -17,12 +17,19 @@
 
 package org.apache.spark.sql.errors
 
-import org.apache.spark.sql.{AnalysisException, ClassData, IntegratedUDFTestUtils, QueryTest, Row}
+import java.util.IllegalFormatException
+
+import org.apache.spark.{SPARK_DOC_ROOT, SparkIllegalArgumentException, SparkUnsupportedOperationException}
+import org.apache.spark.sql._
 import org.apache.spark.sql.api.java.{UDF1, UDF2, UDF23Test}
+import org.apache.spark.sql.catalyst.expressions.{Coalesce, Literal, UnsafeRow}
+import org.apache.spark.sql.catalyst.parser.ParseException
+import org.apache.spark.sql.execution.datasources.parquet.SparkToParquetSchemaConverter
 import org.apache.spark.sql.expressions.SparkUserDefinedFunction
-import org.apache.spark.sql.functions.{grouping, grouping_id, lit, struct, sum, udf}
+import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{IntegerType, MapType, StringType, StructField, StructType}
+import org.apache.spark.sql.test.SharedSparkSession
+import org.apache.spark.sql.types._
 
 case class StringLongClass(a: String, b: Long)
 
@@ -34,7 +41,8 @@ case class ArrayClass(arr: Seq[StringIntClass])
 
 class QueryCompilationErrorsSuite
   extends QueryTest
-  with QueryErrorsSuiteBase {
+  with QueryErrorsBase
+  with SharedSparkSession {
   import testImplicits._
 
   test("CANNOT_UP_CAST_DATATYPE: invalid upcast data type") {
@@ -48,7 +56,7 @@ class QueryCompilationErrorsSuite
         "details" -> (
         s"""
            |The type path of the target object is:
-           |- field (class: "scala.Int", name: "b")
+           |- field (class: "int", name: "b")
            |- root class: "org.apache.spark.sql.errors.StringIntClass"
            |You can either add an explicit cast to the input data or choose a higher precision type
          """.stripMargin.trim + " of the field in the target object")))
@@ -66,7 +74,7 @@ class QueryCompilationErrorsSuite
         "details" -> (
         s"""
            |The type path of the target object is:
-           |- field (class: "scala.Long", name: "b")
+           |- field (class: "long", name: "b")
            |- field (class: "org.apache.spark.sql.errors.StringLongClass", name: "b")
            |- root class: "org.apache.spark.sql.errors.ComplexClass"
            |You can either add an explicit cast to the input data or choose a higher precision type
@@ -109,22 +117,29 @@ class QueryCompilationErrorsSuite
     }
   }
 
-  test("INVALID_PARAMETER_VALUE: the argument_index of string format is invalid") {
+  test("INVALID_PARAMETER_VALUE.ZERO_INDEX: the argument_index of string format is invalid") {
     withSQLConf(SQLConf.ALLOW_ZERO_INDEX_IN_FORMAT_STRING.key -> "false") {
-      val e = intercept[AnalysisException] {
-        sql("select format_string('%0$s', 'Hello')")
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("select format_string('%0$s', 'Hello')")
+        },
+        errorClass = "INVALID_PARAMETER_VALUE.ZERO_INDEX",
+        parameters = Map(
+          "parameter" -> "`strfmt`",
+          "functionName" -> "`format_string`"),
+        context = ExpectedContext(
+          fragment = "format_string('%0$s', 'Hello')", start = 7, stop = 36))
+    }
+    withSQLConf(SQLConf.ALLOW_ZERO_INDEX_IN_FORMAT_STRING.key -> "true") {
+      intercept[IllegalFormatException] {
+        sql("select format_string('%0$s', 'Hello')").collect()
       }
-      checkErrorClass(
-        exception = e,
-        errorClass = "INVALID_PARAMETER_VALUE",
-        msg = "The value of parameter(s) 'strfmt' in `format_string` is invalid: " +
-          "expects %1$, %2$ and so on, but got %0$.; line 1 pos 7")
     }
   }
 
   test("INVALID_PANDAS_UDF_PLACEMENT: Using aggregate function with grouped aggregate pandas UDF") {
     import IntegratedUDFTestUtils._
-    assume(shouldTestGroupedAggPandasUDFs)
+    assume(shouldTestPandasUDFs)
 
     val df = Seq(
       (536361, "85123A", 2, 17850),
@@ -147,6 +162,7 @@ class QueryCompilationErrorsSuite
 
   test("UNSUPPORTED_FEATURE: Using Python UDF with unsupported join condition") {
     import IntegratedUDFTestUtils._
+    assume(shouldTestPythonUDFs)
 
     val df1 = Seq(
       (536361, "85123A", 2, 17850),
@@ -160,22 +176,21 @@ class QueryCompilationErrorsSuite
     ).toDF("CustomerName", "CustomerID")
 
     val e = intercept[AnalysisException] {
-      val pythonTestUDF = TestPythonUDF(name = "python_udf")
+      val pythonTestUDF = TestPythonUDF(name = "python_udf", Some(BooleanType))
       df1.join(
         df2, pythonTestUDF(df1("CustomerID") === df2("CustomerID")), "leftouter").collect()
     }
 
     checkError(
       exception = e,
-      errorClass = "UNSUPPORTED_FEATURE",
-      errorSubClass = Some("PYTHON_UDF_IN_ON_CLAUSE"),
+      errorClass = "UNSUPPORTED_FEATURE.PYTHON_UDF_IN_ON_CLAUSE",
       parameters = Map("joinType" -> "LEFT OUTER"),
       sqlState = Some("0A000"))
   }
 
   test("UNSUPPORTED_FEATURE: Using pandas UDF aggregate expression with pivot") {
     import IntegratedUDFTestUtils._
-    assume(shouldTestGroupedAggPandasUDFs)
+    assume(shouldTestPandasUDFs)
 
     val df = Seq(
       (536361, "85123A", 2, 17850),
@@ -190,8 +205,7 @@ class QueryCompilationErrorsSuite
 
     checkError(
       exception = e,
-      errorClass = "UNSUPPORTED_FEATURE",
-      errorSubClass = "PANDAS_UDAF_IN_PIVOT",
+      errorClass = "UNSUPPORTED_FEATURE.PANDAS_UDAF_IN_PIVOT",
       parameters = Map[String, String](),
       sqlState = "0A000")
   }
@@ -208,11 +222,12 @@ class QueryCompilationErrorsSuite
       val e = intercept[AnalysisException] (
         sql(s"SELECT $functionName(123) as value")
       )
-      checkErrorClass(
+      checkError(
         exception = e,
         errorClass = "NO_HANDLER_FOR_UDAF",
-        msg = "No handler for UDAF 'org.apache.spark.sql.errors.MyCastToString'. " +
-          "Use sparkSession.udf.register(...) instead.; line 1 pos 7")
+        parameters = Map("functionName" -> "org.apache.spark.sql.errors.MyCastToString"),
+        context = ExpectedContext(
+          fragment = "myCast(123)", start = 7, stop = 17))
     }
   }
 
@@ -223,7 +238,7 @@ class QueryCompilationErrorsSuite
       parameters = Map[String, String]())
   }
 
-  test("NO_UDF_INTERFACE_ERROR: java udf class does not implement any udf interface") {
+  test("NO_UDF_INTERFACE: java udf class does not implement any udf interface") {
     val className = "org.apache.spark.sql.errors.MyCastToString"
     val e = intercept[AnalysisException](
       spark.udf.registerJava(
@@ -233,7 +248,7 @@ class QueryCompilationErrorsSuite
     )
     checkError(
       exception = e,
-      errorClass = "NO_UDF_INTERFACE_ERROR",
+      errorClass = "NO_UDF_INTERFACE",
       parameters = Map("className" -> className))
   }
 
@@ -261,8 +276,7 @@ class QueryCompilationErrorsSuite
     )
     checkError(
       exception = e,
-      errorClass = "UNSUPPORTED_FEATURE",
-      errorSubClass = "TOO_MANY_TYPE_ARGUMENTS_FOR_UDF_CLASS",
+      errorClass = "UNSUPPORTED_FEATURE.TOO_MANY_TYPE_ARGUMENTS_FOR_UDF_CLASS",
       parameters = Map("num" -> "24"),
       sqlState = "0A000")
   }
@@ -274,9 +288,8 @@ class QueryCompilationErrorsSuite
     checkError(
       exception = groupingColMismatchEx,
       errorClass = "GROUPING_COLUMN_MISMATCH",
-      errorSubClass = None,
       parameters = Map("grouping" -> "earnings.*", "groupingColumns" -> "course.*,year.*"),
-      sqlState = Some("42000"),
+      sqlState = Some("42803"),
       matchPVals = true)
   }
 
@@ -287,10 +300,9 @@ class QueryCompilationErrorsSuite
     checkError(
       exception = groupingIdColMismatchEx,
       errorClass = "GROUPING_ID_COLUMN_MISMATCH",
-      errorSubClass = None,
       parameters = Map("groupingIdColumn" -> "earnings.*",
       "groupByColumns" -> "course.*,year.*"),
-      sqlState = Some("42000"),
+      sqlState = Some("42803"),
       matchPVals = true)
   }
 
@@ -397,20 +409,40 @@ class QueryCompilationErrorsSuite
         spark.read.schema(schema).json(spark.emptyDataset[String])
       },
       errorClass = "INVALID_JSON_SCHEMA_MAP_TYPE",
-      parameters = Map("jsonSchema" -> "\"STRUCT<map: MAP<INT, INT>>\"")
+      parameters = Map("jsonSchema" -> "\"STRUCT<map: MAP<INT, INT> NOT NULL>\"")
     )
   }
 
   test("UNRESOLVED_MAP_KEY: string type literal should be quoted") {
     checkAnswer(sql("select m['a'] from (select map('a', 'b') as m, 'aa' as aa)"), Row("b"))
+    val query = "select m[a] from (select map('a', 'b') as m, 'aa' as aa)"
     checkError(
-      exception = intercept[AnalysisException] {
-        sql("select m[a] from (select map('a', 'b') as m, 'aa' as aa)")
-      },
-      errorClass = "UNRESOLVED_MAP_KEY",
-      parameters = Map("columnName" -> "`a`",
-        "proposal" ->
-          "`__auto_generated_subquery_name`.`m`, `__auto_generated_subquery_name`.`aa`"))
+      exception = intercept[AnalysisException] {sql(query)},
+      errorClass = "UNRESOLVED_MAP_KEY.WITH_SUGGESTION",
+      sqlState = None,
+      parameters = Map("objectName" -> "`a`",
+        "proposal" -> "`aa`, `m`"),
+      context = ExpectedContext(
+        fragment = "a",
+        start = 9,
+        stop = 9)
+    )
+  }
+
+  test("UNRESOLVED_MAP_KEY: proposal columns containing quoted dots") {
+    val query = "select m[a] from (select map('a', 'b') as m, 'aa' as `a.a`)"
+    checkError(
+      exception = intercept[AnalysisException] {sql(query)},
+      errorClass = "UNRESOLVED_MAP_KEY.WITH_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "objectName" -> "`a`",
+        "proposal" -> "`m`, `a.a`"),
+      context = ExpectedContext(
+        fragment = "a",
+        start = 9,
+        stop = 9)
+    )
   }
 
   test("UNRESOLVED_COLUMN: SELECT distinct does not work correctly " +
@@ -425,7 +457,7 @@ class QueryCompilationErrorsSuite
           |order by a, b
           |""".stripMargin), Row(1, 2) :: Nil)
 
-    checkErrorClass(
+    checkError(
       exception = intercept[AnalysisException] {
         sql(
           """select distinct struct.a, struct.b
@@ -436,20 +468,17 @@ class QueryCompilationErrorsSuite
             |order by struct.a, struct.b
             |""".stripMargin)
       },
-      errorClass = "UNRESOLVED_COLUMN",
-      msg = """A column or function parameter with name `struct`.`a` cannot be resolved. """ +
-        """Did you mean one of the following\? \[`a`, `b`\]; line 6 pos 9;
-           |'Sort \['struct.a ASC NULLS FIRST, 'struct.b ASC NULLS FIRST\], true
-           |\+\- Distinct
-           |   \+\- Project \[struct#\w+\.a AS a#\w+, struct#\w+\.b AS b#\w+\]
-           |      \+\- SubqueryAlias tmp
-           |         \+\- Union false, false
-           |            :\- Project \[named_struct\(a, 1, b, 2, c, 3\) AS struct#\w+\]
-           |            :  \+\- OneRowRelation
-           |            \+\- Project \[named_struct\(a, 1, b, 2, c, 4\) AS struct#\w+\]
-           |               \+\- OneRowRelation
-           |""".stripMargin,
-      matchMsg = true)
+      errorClass = "UNRESOLVED_COLUMN.WITH_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "objectName" -> "`struct`.`a`",
+        "proposal" -> "`a`, `b`"
+      ),
+      context = ExpectedContext(
+        fragment = "struct.a",
+        start = 180,
+        stop = 187)
+    )
   }
 
   test("UNRESOLVED_COLUMN - SPARK-21335: support un-aliased subquery") {
@@ -457,38 +486,66 @@ class QueryCompilationErrorsSuite
       Seq(1 -> "a").toDF("i", "j").createOrReplaceTempView("v")
       checkAnswer(sql("SELECT i from (SELECT i FROM v)"), Row(1))
 
-      checkErrorClass(
-        exception = intercept[AnalysisException](sql("SELECT v.i from (SELECT i FROM v)")),
-        errorClass = "UNRESOLVED_COLUMN",
-        msg = "A column or function parameter with name `v`.`i` cannot be resolved. " +
-          """Did you mean one of the following\? """ +
-          """\[`__auto_generated_subquery_name`.`i`\]; line 1 pos 7;
-            |'Project \['v.i\]
-            |\+\- SubqueryAlias __auto_generated_subquery_name
-            |   \+\- Project \[i#\w+\]
-            |      \+\- SubqueryAlias v
-            |         \+\- View \(`v`, \[i#\w+,j#\w+\]\)
-            |            \+\- Project \[_\w+#\w+ AS i#\w+, _\w+#\w+ AS j#\w+\]
-            |               \+\- LocalRelation \[_\w+#\w+, _\w+#\w+\]
-            |""".stripMargin,
-        matchMsg = true)
+      val query = "SELECT v.i from (SELECT i FROM v)"
+      checkError(
+        exception = intercept[AnalysisException](sql(query)),
+        errorClass = "UNRESOLVED_COLUMN.WITH_SUGGESTION",
+        sqlState = None,
+        parameters = Map(
+          "objectName" -> "`v`.`i`",
+          "proposal" -> "`i`"),
+        context = ExpectedContext(
+          fragment = "v.i",
+          start = 7,
+          stop = 9))
 
       checkAnswer(sql("SELECT __auto_generated_subquery_name.i from (SELECT i FROM v)"), Row(1))
+      checkAnswer(sql("SELECT i from (SELECT i FROM v)"), Row(1))
     }
   }
 
-  test("AMBIGUOUS_FIELD_NAME: alter column matching multi fields in the struct") {
+  test("AMBIGUOUS_ALIAS_IN_NESTED_CTE: Nested CTEs with same name and " +
+    "ctePrecedencePolicy = EXCEPTION") {
+    withTable("t") {
+      withSQLConf(SQLConf.LEGACY_CTE_PRECEDENCE_POLICY.key -> "EXCEPTION") {
+        val query =
+          """
+            |WITH
+            |    t AS (SELECT 1),
+            |    t2 AS (
+            |        WITH t AS (SELECT 2)
+            |        SELECT * FROM t)
+            |SELECT * FROM t2;
+            |""".stripMargin
+
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql(query)
+          },
+          errorClass = "AMBIGUOUS_ALIAS_IN_NESTED_CTE",
+          parameters = Map(
+            "name" -> "`t`",
+            "config" -> toSQLConf(SQLConf.LEGACY_CTE_PRECEDENCE_POLICY.key),
+            "docroot" -> SPARK_DOC_ROOT))
+      }
+    }
+  }
+
+  test("AMBIGUOUS_COLUMN_OR_FIELD: alter column matching multi fields in the struct") {
     withTable("t") {
       withSQLConf(SQLConf.CASE_SENSITIVE.key -> "true") {
         sql("CREATE TABLE t(c struct<X:String, x:String>) USING parquet")
       }
 
-      checkErrorClass(
+      val query = "ALTER TABLE t CHANGE COLUMN c.X COMMENT 'new comment'"
+      checkError(
         exception = intercept[AnalysisException] {
-          sql("ALTER TABLE t CHANGE COLUMN c.X COMMENT 'new comment'")
+          sql(query)
         },
-        errorClass = "AMBIGUOUS_FIELD_NAME",
-        msg = "Field name c.X is ambiguous and has 2 matching fields in the struct.; line 1 pos 0")
+        errorClass = "AMBIGUOUS_COLUMN_OR_FIELD",
+        parameters = Map("name" -> "`c`.`X`", "n" -> "2"),
+        context = ExpectedContext(
+          fragment = query, start = 0, stop = 52))
     }
   }
 
@@ -522,10 +579,12 @@ class QueryCompilationErrorsSuite
       val e = intercept[AnalysisException] {
         sql("ALTER TABLE t ADD COLUMNS (m.n int)")
       }
-      checkErrorClass(
+      checkError(
         exception = e,
         errorClass = "INVALID_FIELD_NAME",
-        msg = "Field name `m`.`n` is invalid: `m` is not a struct.; line 1 pos 27")
+        parameters = Map("fieldName" -> "`m`.`n`", "path" -> "`m`"),
+        context = ExpectedContext(
+          fragment = "m.n int", start = 27, stop = 33))
     }
   }
 
@@ -554,10 +613,8 @@ class QueryCompilationErrorsSuite
     }
     checkError(
       exception = e,
-      errorClass = "UNSUPPORTED_DESERIALIZER",
-      errorSubClass = Some("DATA_TYPE_MISMATCH"),
-      parameters = Map("desiredType" -> "\"ARRAY\"", "dataType" -> "\"INT\""),
-      sqlState = None)
+      errorClass = "UNSUPPORTED_DESERIALIZER.DATA_TYPE_MISMATCH",
+      parameters = Map("desiredType" -> "\"ARRAY\"", "dataType" -> "\"INT\""))
   }
 
   test("UNSUPPORTED_DESERIALIZER: " +
@@ -569,22 +626,19 @@ class QueryCompilationErrorsSuite
     }
     checkError(
       exception = e1,
-      errorClass = "UNSUPPORTED_DESERIALIZER",
-      errorSubClass = Some("FIELD_NUMBER_MISMATCH"),
-      parameters = Map("schema" -> "\"STRUCT<a: STRING, b: INT>\"",
-        "ordinal" -> "3"),
-      sqlState = None)
+      errorClass = "UNSUPPORTED_DESERIALIZER.FIELD_NUMBER_MISMATCH",
+      parameters = Map(
+        "schema" -> "\"STRUCT<a: STRING, b: INT NOT NULL>\"",
+        "ordinal" -> "3"))
 
     val e2 = intercept[AnalysisException] {
       ds.as[Tuple1[String]]
     }
     checkError(
       exception = e2,
-      errorClass = "UNSUPPORTED_DESERIALIZER",
-      errorSubClass = Some("FIELD_NUMBER_MISMATCH"),
-      parameters = Map("schema" -> "\"STRUCT<a: STRING, b: INT>\"",
-        "ordinal" -> "1"),
-      sqlState = None)
+      errorClass = "UNSUPPORTED_DESERIALIZER.FIELD_NUMBER_MISMATCH",
+      parameters = Map("schema" -> "\"STRUCT<a: STRING, b: INT NOT NULL>\"",
+        "ordinal" -> "1"))
   }
 
   test("UNSUPPORTED_GENERATOR: " +
@@ -595,24 +649,8 @@ class QueryCompilationErrorsSuite
 
     checkError(
       exception = e,
-      errorClass = "UNSUPPORTED_GENERATOR",
-      errorSubClass = Some("NESTED_IN_EXPRESSIONS"),
-      parameters = Map("expression" -> "\"(explode(array(1, 2, 3)) + 1)\""),
-      sqlState = None)
-  }
-
-  test("UNSUPPORTED_GENERATOR: only one generator allowed") {
-    val e = intercept[AnalysisException](
-      sql("""select explode(Array(1, 2, 3)), explode(Array(1, 2, 3))""").collect()
-    )
-
-    checkError(
-      exception = e,
-      errorClass = "UNSUPPORTED_GENERATOR",
-      errorSubClass = Some("MULTI_GENERATOR"),
-      parameters = Map("clause" -> "SELECT", "num" -> "2",
-        "generators" -> "\"explode(array(1, 2, 3))\", \"explode(array(1, 2, 3))\""),
-      sqlState = None)
+      errorClass = "UNSUPPORTED_GENERATOR.NESTED_IN_EXPRESSIONS",
+      parameters = Map("expression" -> "\"(explode(array(1, 2, 3)) + 1)\""))
   }
 
   test("UNSUPPORTED_GENERATOR: generators are not supported outside the SELECT clause") {
@@ -622,10 +660,8 @@ class QueryCompilationErrorsSuite
 
     checkError(
       exception = e,
-      errorClass = "UNSUPPORTED_GENERATOR",
-      errorSubClass = Some("OUTSIDE_SELECT"),
-      parameters = Map("plan" -> "'Sort [explode(array(1, 2, 3)) ASC NULLS FIRST], true"),
-      sqlState = None)
+      errorClass = "UNSUPPORTED_GENERATOR.OUTSIDE_SELECT",
+      parameters = Map("plan" -> "'Sort [explode(array(1, 2, 3)) ASC NULLS FIRST], true"))
   }
 
   test("UNSUPPORTED_GENERATOR: not a generator") {
@@ -637,13 +673,257 @@ class QueryCompilationErrorsSuite
           |LATERAL VIEW array_contains(value, 1) AS explodedvalue""".stripMargin).collect()
     )
 
-    checkErrorClass(
+    checkError(
       exception = e,
-      errorClass = "UNSUPPORTED_GENERATOR",
-      errorSubClass = Some("NOT_GENERATOR"),
-      msg = """The generator is not supported: `array_contains` is expected to be a generator. """ +
-        "However, its class is org.apache.spark.sql.catalyst.expressions.ArrayContains, " +
-        "which is not a generator.; line 4 pos 0"
+      errorClass = "UNSUPPORTED_GENERATOR.NOT_GENERATOR",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`array_contains`",
+        "classCanonicalName" -> "org.apache.spark.sql.catalyst.expressions.ArrayContains"),
+      context = ExpectedContext(
+        fragment = "LATERAL VIEW array_contains(value, 1) AS explodedvalue",
+        start = 62, stop = 115))
+  }
+
+  test("DATATYPE_MISMATCH.INVALID_JSON_SCHEMA: invalid top type passed to from_json()") {
+    checkError(
+      exception = intercept[AnalysisException] {
+        Seq("""{"a":1}""").toDF("a").select(from_json($"a", IntegerType)).collect()
+      },
+      errorClass = "DATATYPE_MISMATCH.INVALID_JSON_SCHEMA",
+      parameters = Map("schema" -> "\"INT\"", "sqlExpr" -> "\"from_json(a)\""),
+      context =
+        ExpectedContext(fragment = "from_json", callSitePattern = getCurrentClassCallSitePattern))
+  }
+
+  test("WRONG_NUM_ARGS.WITHOUT_SUGGESTION: wrong args of CAST(parameter types contains DataType)") {
+    checkError(
+      exception = intercept[AnalysisException] {
+        sql("SELECT CAST(1)")
+      },
+      errorClass = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      parameters = Map(
+        "functionName" -> "`cast`",
+        "expectedNum" -> "0",
+        "actualNum" -> "1",
+        "docroot" -> SPARK_DOC_ROOT),
+      context = ExpectedContext("", "", 7, 13, "CAST(1)")
+    )
+  }
+
+  test("IDENTIFIER_TOO_MANY_NAME_PARTS: " +
+    "create temp view doesn't support identifiers consisting of more than 2 parts") {
+    checkError(
+      exception = intercept[ParseException] {
+        sql("CREATE TEMPORARY VIEW db_name.schema_name.view_name AS SELECT '1' as test_column")
+      },
+      errorClass = "IDENTIFIER_TOO_MANY_NAME_PARTS",
+      sqlState = "42601",
+      parameters = Map("identifier" -> "`db_name`.`schema_name`.`view_name`")
+    )
+  }
+
+  test("IDENTIFIER_TOO_MANY_NAME_PARTS: " +
+    "alter table doesn't support identifiers consisting of more than 2 parts") {
+    val tableName: String = "t"
+    withTable(tableName) {
+      sql(
+        s"""
+           |CREATE TABLE $tableName (a STRING, b INT, c STRING, d STRING)
+           |USING parquet
+           |PARTITIONED BY (c, d)
+           |""".stripMargin)
+
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql(s"ALTER TABLE $tableName RENAME TO db_name.schema_name.new_table_name")
+        },
+        errorClass = "IDENTIFIER_TOO_MANY_NAME_PARTS",
+        sqlState = "42601",
+        parameters = Map("identifier" -> "`db_name`.`schema_name`.`new_table_name`")
+      )
+    }
+  }
+
+  test("AMBIGUOUS_REFERENCE_TO_FIELDS: select ambiguous field from struct") {
+    val data = Seq(
+      Row(Row("test1", "test1")),
+      Row(Row("test2", "test2")))
+
+    val schema = new StructType()
+      .add("name",
+        new StructType()
+          .add("firstname", StringType)
+          .add("firstname", StringType))
+
+    val df = spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.select($"name.firstname")
+      },
+      errorClass = "AMBIGUOUS_REFERENCE_TO_FIELDS",
+      sqlState = "42000",
+      parameters = Map("field" -> "`firstname`", "count" -> "2"),
+      context = ExpectedContext(fragment = "$", callSitePattern = getCurrentClassCallSitePattern)
+    )
+  }
+
+  test("INVALID_EXTRACT_BASE_FIELD_TYPE: select ambiguous field from struct") {
+    val df = Seq("test").toDF("firstname")
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.select($"firstname.test_field")
+      },
+      errorClass = "INVALID_EXTRACT_BASE_FIELD_TYPE",
+      sqlState = "42000",
+      parameters = Map("base" -> "\"firstname\"", "other" -> "\"STRING\""),
+      context = ExpectedContext(fragment = "$", callSitePattern = getCurrentClassCallSitePattern)
+    )
+  }
+
+  test("INVALID_EXTRACT_FIELD_TYPE: extract not string literal field") {
+    val structureData = Seq(
+      Row(Row(Row("test1", "test1"))),
+      Row(Row(Row("test2", "test2"))))
+
+    val structureSchema = new StructType()
+      .add("name",
+        new StructType()
+          .add("inner",
+            new StructType()
+              .add("firstname", StringType)
+              .add("lastname", StringType)))
+
+    val df = spark.createDataFrame(spark.sparkContext.parallelize(structureData), structureSchema)
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.select(struct($"name"(struct("test"))))
+      },
+      errorClass = "INVALID_EXTRACT_FIELD_TYPE",
+      sqlState = "42000",
+      parameters = Map("extraction" -> "\"struct(test)\""))
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.select($"name"(array("test")))
+      },
+      errorClass = "INVALID_EXTRACT_FIELD_TYPE",
+      sqlState = "42000",
+      parameters = Map("extraction" -> "\"array(test)\""))
+  }
+
+  test("SPARK-43841: Unresolved attribute in select of full outer join with USING") {
+    withTempView("v1", "v2") {
+      sql("create or replace temp view v1 as values (1, 2) as (c1, c2)")
+      sql("create or replace temp view v2 as values (2, 3) as (c1, c2)")
+
+      val query =
+        """select b
+          |from v1
+          |full outer join v2
+          |using (c1)
+          |""".stripMargin
+
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql(query)
+        },
+        errorClass = "UNRESOLVED_COLUMN.WITH_SUGGESTION",
+        parameters = Map(
+          "proposal" -> "`c1`, `v1`.`c2`, `v2`.`c2`",
+          "objectName" -> "`b`"),
+        context = ExpectedContext(
+          fragment = "b",
+          start = 7, stop = 7)
+      )
+    }
+  }
+
+  test("ComplexTypeMergingExpression should throw exception if no children") {
+    val coalesce = Coalesce(Seq.empty)
+
+    checkError(
+      exception = intercept[SparkIllegalArgumentException] {
+        coalesce.dataType
+      },
+      errorClass = "COMPLEX_EXPRESSION_UNSUPPORTED_INPUT.NO_INPUTS",
+      parameters = Map("expression" -> "\"coalesce()\""))
+  }
+
+  test("ComplexTypeMergingExpression should throw " +
+    "exception if children have different data types") {
+    val coalesce = Coalesce(Seq(Literal(1), Literal("a"), Literal("a")))
+
+    checkError(
+      exception = intercept[SparkIllegalArgumentException] {
+        coalesce.dataType
+      },
+      errorClass = "COMPLEX_EXPRESSION_UNSUPPORTED_INPUT.MISMATCHED_TYPES",
+      parameters = Map(
+        "expression" -> "\"coalesce(1, a, a)\"",
+        "inputTypes" -> "[\"INT\", \"STRING\", \"STRING\"]"))
+  }
+
+  test("UNSUPPORTED_CALL: call the unsupported method update()") {
+    checkError(
+      exception = intercept[SparkUnsupportedOperationException] {
+        new UnsafeRow(1).update(0, 1)
+      },
+      errorClass = "UNSUPPORTED_CALL.WITHOUT_SUGGESTION",
+      parameters = Map(
+        "methodName" -> "update",
+        "className" -> "org.apache.spark.sql.catalyst.expressions.UnsafeRow"))
+  }
+
+  test("SPARK-47102: the collation feature is off without collate builder call") {
+    withSQLConf(SQLConf.COLLATION_ENABLED.key -> "false") {
+      Seq(
+        "CREATE TABLE t(col STRING COLLATE UNICODE_CI) USING parquet",
+        "CREATE TABLE t(col STRING COLLATE UNKNOWN_COLLATION_STRING) USING parquet",
+        "SELECT 'aaa' COLLATE UNICODE_CI",
+        "select collation('aaa')"
+      ).foreach { sqlText =>
+        checkError(
+          exception = intercept[AnalysisException](sql(sqlText)),
+          errorClass = "UNSUPPORTED_FEATURE.COLLATION")
+      }
+    }
+  }
+
+  test("SPARK-47102: the collation feature is off with collate builder call") {
+    withSQLConf(SQLConf.COLLATION_ENABLED.key -> "false") {
+      Seq(
+        "SELECT collate('aaa', 'UNICODE_CI')",
+        "SELECT collate('aaa', 'UNKNOWN_COLLATION_STRING')"
+      ).foreach { sqlText =>
+        checkError(
+          exception = intercept[AnalysisException](sql(sqlText)),
+          errorClass = "UNSUPPORTED_FEATURE.COLLATION",
+          parameters = Map.empty,
+          context = ExpectedContext(
+            fragment = sqlText.substring(7), start = 7, stop = sqlText.length - 1))
+      }
+    }
+  }
+
+  test("INTERNAL_ERROR: Convert unsupported data type from Spark to Parquet") {
+    val converter = new SparkToParquetSchemaConverter
+    val dummyDataType = new DataType {
+      override def defaultSize: Int = 0
+
+      override def simpleString: String = "Dummy"
+
+      override private[spark] def asNullable = NullType
+    }
+    checkError(
+      exception = intercept[AnalysisException] {
+        converter.convertField(StructField("test", dummyDataType))
+      },
+      errorClass = "INTERNAL_ERROR",
+      parameters = Map("message" -> "Cannot convert Spark data type \"DUMMY\" to any Parquet type.")
     )
   }
 }

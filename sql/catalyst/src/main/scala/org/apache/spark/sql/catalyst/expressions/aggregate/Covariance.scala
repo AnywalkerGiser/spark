@@ -22,6 +22,7 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.trees.BinaryLike
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * Compute the covariance between two expressions.
@@ -48,7 +49,7 @@ abstract class Covariance(val left: Expression, val right: Expression, nullOnDiv
 
   override val aggBufferAttributes: Seq[AttributeReference] = Seq(n, xAvg, yAvg, ck)
 
-  override val initialValues: Seq[Expression] = Array.fill(4)(Literal(0.0))
+  override val initialValues: Seq[Expression] = Array.fill(4)(Literal(0.0)).toImmutableArraySeq
 
   override lazy val updateExpressions: Seq[Expression] = updateExpressionsDef
 
@@ -142,4 +143,26 @@ case class CovSample(
 
   override protected def withNewChildrenInternal(
       newLeft: Expression, newRight: Expression): CovSample = copy(left = newLeft, right = newRight)
+}
+
+/**
+ * Covariance in Pandas' fashion. This expression is dedicated only for Pandas API on Spark.
+ * Refer to numpy.cov.
+ */
+case class PandasCovar(
+    override val left: Expression,
+    override val right: Expression,
+    ddof: Int)
+  extends Covariance(left, right, true) {
+
+  override val evaluateExpression: Expression = {
+    If(n === 0.0, Literal.create(null, DoubleType),
+      If(n === ddof.toDouble, divideByZeroEvalResult, ck / (n - ddof.toDouble)))
+  }
+  override def prettyName: String = "pandas_covar"
+
+  override protected def withNewChildrenInternal(
+      newLeft: Expression,
+      newRight: Expression): PandasCovar =
+    copy(left = newLeft, right = newRight)
 }

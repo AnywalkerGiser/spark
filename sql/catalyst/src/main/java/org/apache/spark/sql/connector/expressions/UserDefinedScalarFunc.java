@@ -17,12 +17,10 @@
 
 package org.apache.spark.sql.connector.expressions;
 
-import java.io.Serializable;
 import java.util.Arrays;
-import java.util.Objects;
 
 import org.apache.spark.annotation.Evolving;
-import org.apache.spark.sql.internal.connector.ToStringSQLBuilder;
+import org.apache.spark.sql.internal.connector.ExpressionWithToString;
 
 /**
  * The general representation of user defined scalar function, which contains the upper-cased
@@ -31,7 +29,7 @@ import org.apache.spark.sql.internal.connector.ToStringSQLBuilder;
  * @since 3.4.0
  */
 @Evolving
-public class UserDefinedScalarFunc implements Expression, Serializable {
+public class UserDefinedScalarFunc extends ExpressionWithToString {
   private String name;
   private String canonicalName;
   private Expression[] children;
@@ -52,19 +50,19 @@ public class UserDefinedScalarFunc implements Expression, Serializable {
   public boolean equals(Object o) {
     if (this == o) return true;
     if (o == null || getClass() != o.getClass()) return false;
+
     UserDefinedScalarFunc that = (UserDefinedScalarFunc) o;
-    return Objects.equals(name, that.name) && Objects.equals(canonicalName, that.canonicalName) &&
-      Arrays.equals(children, that.children);
+
+    if (!name.equals(that.name)) return false;
+    if (!canonicalName.equals(that.canonicalName)) return false;
+    return Arrays.equals(children, that.children);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(name, canonicalName, children);
-  }
-
-  @Override
-  public String toString() {
-    ToStringSQLBuilder builder = new ToStringSQLBuilder();
-    return builder.build(this);
+    int result = name.hashCode();
+    result = 31 * result + canonicalName.hashCode();
+    result = 31 * result + Arrays.hashCode(children);
+    return result;
   }
 }

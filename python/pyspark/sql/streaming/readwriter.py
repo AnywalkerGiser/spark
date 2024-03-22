@@ -24,8 +24,14 @@ from py4j.java_gateway import java_import, JavaObject
 from pyspark.sql.column import _to_seq
 from pyspark.sql.readwriter import OptionUtils, to_str
 from pyspark.sql.streaming.query import StreamingQuery
-from pyspark.sql.types import Row, StructType, StructField, StringType
+from pyspark.sql.types import Row, StructType
 from pyspark.sql.utils import ForeachBatchFunction
+from pyspark.errors import (
+    PySparkTypeError,
+    PySparkValueError,
+    PySparkAttributeError,
+    PySparkRuntimeError,
+)
 
 if TYPE_CHECKING:
     from pyspark.sql.session import SparkSession
@@ -43,9 +49,28 @@ class DataStreamReader(OptionUtils):
 
     .. versionadded:: 2.0.0
 
+    .. versionchanged:: 3.5.0
+        Supports Spark Connect.
+
     Notes
     -----
     This API is evolving.
+
+    Examples
+    --------
+    >>> spark.readStream
+    <...streaming.readwriter.DataStreamReader object ...>
+
+    The example below uses Rate source that generates rows continuously.
+    After that, we operate a modulo by 3, and then writes the stream out to the console.
+    The streaming query stops in 3 seconds.
+
+    >>> import time
+    >>> df = spark.readStream.format("rate").load()
+    >>> df = df.selectExpr("value % 3 as v")
+    >>> q = df.writeStream.format("console").start()
+    >>> time.sleep(3)
+    >>> q.stop()
     """
 
     def __init__(self, spark: "SparkSession") -> None:
@@ -62,6 +87,9 @@ class DataStreamReader(OptionUtils):
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Parameters
         ----------
         source : str
@@ -73,7 +101,23 @@ class DataStreamReader(OptionUtils):
 
         Examples
         --------
-        >>> s = spark.readStream.format("text")
+        >>> spark.readStream.format("text")
+        <...streaming.readwriter.DataStreamReader object ...>
+
+        This API allows to configure other sources to read. The example below writes a small text
+        file, and reads it back via Text source.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="format") as d:
+        ...     # Write a temporary text file to read it.
+        ...     spark.createDataFrame(
+        ...         [("hello",), ("this",)]).write.mode("overwrite").format("text").save(d)
+        ...
+        ...     # Start a streaming query to read the text file.
+        ...     q = spark.readStream.format("text").load(d).writeStream.format("console").start()
+        ...     time.sleep(3)
+        ...     q.stop()
         """
         self._jreader = self._jreader.format(source)
         return self
@@ -87,6 +131,9 @@ class DataStreamReader(OptionUtils):
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Parameters
         ----------
         schema : :class:`pyspark.sql.types.StructType` or str
@@ -99,8 +146,22 @@ class DataStreamReader(OptionUtils):
 
         Examples
         --------
-        >>> s = spark.readStream.schema(sdf_schema)
-        >>> s = spark.readStream.schema("col0 INT, col1 DOUBLE")
+        >>> from pyspark.sql.types import StructField, StructType, StringType
+        >>> spark.readStream.schema(StructType([StructField("data", StringType(), True)]))
+        <...streaming.readwriter.DataStreamReader object ...>
+        >>> spark.readStream.schema("col0 INT, col1 DOUBLE")
+        <...streaming.readwriter.DataStreamReader object ...>
+
+        The example below specifies a different schema to CSV file.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="schema") as d:
+        ...     # Start a streaming query to read the CSV file.
+        ...     spark.readStream.schema("col0 INT, col1 STRING").format("csv").load(d).printSchema()
+        root
+         |-- col0: integer (nullable = true)
+         |-- col1: string (nullable = true)
         """
         from pyspark.sql import SparkSession
 
@@ -111,7 +172,10 @@ class DataStreamReader(OptionUtils):
         elif isinstance(schema, str):
             self._jreader = self._jreader.schema(schema)
         else:
-            raise TypeError("schema should be StructType or string")
+            raise PySparkTypeError(
+                error_class="NOT_STR_OR_STRUCT",
+                message_parameters={"arg_name": "schema", "arg_type": type(schema).__name__},
+            )
         return self
 
     def option(self, key: str, value: "OptionalPrimitiveType") -> "DataStreamReader":
@@ -119,13 +183,26 @@ class DataStreamReader(OptionUtils):
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Notes
         -----
         This API is evolving.
 
         Examples
         --------
-        >>> s = spark.readStream.option("x", 1)
+        >>> spark.readStream.option("x", 1)
+        <...streaming.readwriter.DataStreamReader object ...>
+
+        The example below specifies 'rowsPerSecond' option to Rate source in order to generate
+        10 rows every second.
+
+        >>> import time
+        >>> q = spark.readStream.format(
+        ...     "rate").option("rowsPerSecond", 10).load().writeStream.format("console").start()
+        >>> time.sleep(3)
+        >>> q.stop()
         """
         self._jreader = self._jreader.option(key, to_str(value))
         return self
@@ -135,13 +212,32 @@ class DataStreamReader(OptionUtils):
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Notes
         -----
         This API is evolving.
 
         Examples
         --------
-        >>> s = spark.readStream.options(x="1", y=2)
+        >>> spark.readStream.options(x="1", y=2)
+        <...streaming.readwriter.DataStreamReader object ...>
+
+        Specify options in a dictionary.
+
+        >>> spark.readStream.options(**{"k1": "v1", "k2": "v2"})
+        <...streaming.readwriter.DataStreamReader object ...>
+
+        The example below specifies 'rowsPerSecond' and 'numPartitions' options to
+        Rate source in order to generate 10 rows with 10 partitions every second.
+
+        >>> import time
+        >>> q = spark.readStream.format("rate").options(
+        ...    rowsPerSecond=10, numPartitions=10
+        ... ).load().writeStream.format("console").start()
+        >>> time.sleep(3)
+        >>> q.stop()
         """
         for k in options:
             self._jreader = self._jreader.option(k, to_str(options[k]))
@@ -158,6 +254,9 @@ class DataStreamReader(OptionUtils):
         :class:`DataFrame <pyspark.sql.DataFrame>`.
 
         .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
 
         Parameters
         ----------
@@ -177,13 +276,22 @@ class DataStreamReader(OptionUtils):
 
         Examples
         --------
-        >>> json_sdf = spark.readStream.format("json") \\
-        ...     .schema(sdf_schema) \\
-        ...     .load(tempfile.mkdtemp())
-        >>> json_sdf.isStreaming
-        True
-        >>> json_sdf.schema == sdf_schema
-        True
+        Load a data stream from a temporary JSON file.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="load") as d:
+        ...     # Write a temporary JSON file to read it.
+        ...     spark.createDataFrame(
+        ...         [(100, "Hyukjin Kwon"),], ["age", "name"]
+        ...     ).write.mode("overwrite").format("json").save(d)
+        ...
+        ...     # Start a streaming query to read the JSON file.
+        ...     q = spark.readStream.schema(
+        ...         "age INT, name STRING"
+        ...     ).format("json").load(d).writeStream.format("console").start()
+        ...     time.sleep(3)
+        ...     q.stop()
         """
         if format is not None:
             self.format(format)
@@ -192,9 +300,9 @@ class DataStreamReader(OptionUtils):
         self.options(**options)
         if path is not None:
             if type(path) != str or len(path.strip()) == 0:
-                raise ValueError(
-                    "If the path is provided for stream, it needs to be a "
-                    + "non-empty string. List of paths are not supported."
+                raise PySparkValueError(
+                    error_class="VALUE_NOT_NON_EMPTY_STR",
+                    message_parameters={"arg_name": "path", "arg_value": str(path)},
                 )
             return self._df(self._jreader.load(path))
         else:
@@ -236,6 +344,9 @@ class DataStreamReader(OptionUtils):
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Parameters
         ----------
         path : str
@@ -260,11 +371,22 @@ class DataStreamReader(OptionUtils):
 
         Examples
         --------
-        >>> json_sdf = spark.readStream.json(tempfile.mkdtemp(), schema = sdf_schema)
-        >>> json_sdf.isStreaming
-        True
-        >>> json_sdf.schema == sdf_schema
-        True
+        Load a data stream from a temporary JSON file.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="json") as d:
+        ...     # Write a temporary JSON file to read it.
+        ...     spark.createDataFrame(
+        ...         [(100, "Hyukjin Kwon"),], ["age", "name"]
+        ...     ).write.mode("overwrite").format("json").save(d)
+        ...
+        ...     # Start a streaming query to read the JSON file.
+        ...     q = spark.readStream.schema(
+        ...         "age INT, name STRING"
+        ...     ).json(d).writeStream.format("console").start()
+        ...     time.sleep(3)
+        ...     q.stop()
         """
         self._set_opts(
             schema=schema,
@@ -292,7 +414,10 @@ class DataStreamReader(OptionUtils):
         if isinstance(path, str):
             return self._df(self._jreader.json(path))
         else:
-            raise TypeError("path can be only a single string")
+            raise PySparkTypeError(
+                error_class="NOT_STR",
+                message_parameters={"arg_name": "path", "arg_type": type(path).__name__},
+            )
 
     def orc(
         self,
@@ -305,6 +430,9 @@ class DataStreamReader(OptionUtils):
 
         .. versionadded:: 2.3.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Other Parameters
         ----------------
         Extra options
@@ -316,11 +444,18 @@ class DataStreamReader(OptionUtils):
 
         Examples
         --------
-        >>> orc_sdf = spark.readStream.schema(sdf_schema).orc(tempfile.mkdtemp())
-        >>> orc_sdf.isStreaming
-        True
-        >>> orc_sdf.schema == sdf_schema
-        True
+        Load a data stream from a temporary ORC file.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="orc") as d:
+        ...     # Write a temporary ORC file to read it.
+        ...     spark.range(10).write.mode("overwrite").format("orc").save(d)
+        ...
+        ...     # Start a streaming query to read the ORC file.
+        ...     q = spark.readStream.schema("id LONG").orc(d).writeStream.format("console").start()
+        ...     time.sleep(3)
+        ...     q.stop()
         """
         self._set_opts(
             mergeSchema=mergeSchema,
@@ -330,7 +465,10 @@ class DataStreamReader(OptionUtils):
         if isinstance(path, str):
             return self._df(self._jreader.orc(path))
         else:
-            raise TypeError("path can be only a single string")
+            raise PySparkTypeError(
+                error_class="NOT_STR",
+                message_parameters={"arg_name": "path", "arg_type": type(path).__name__},
+            )
 
     def parquet(
         self,
@@ -345,6 +483,9 @@ class DataStreamReader(OptionUtils):
         Loads a Parquet file stream, returning the result as a :class:`DataFrame`.
 
         .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
 
         Parameters
         ----------
@@ -362,11 +503,19 @@ class DataStreamReader(OptionUtils):
 
         Examples
         --------
-        >>> parquet_sdf = spark.readStream.schema(sdf_schema).parquet(tempfile.mkdtemp())
-        >>> parquet_sdf.isStreaming
-        True
-        >>> parquet_sdf.schema == sdf_schema
-        True
+        Load a data stream from a temporary Parquet file.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="parquet") as d:
+        ...     # Write a temporary Parquet file to read it.
+        ...     spark.range(10).write.mode("overwrite").format("parquet").save(d)
+        ...
+        ...     # Start a streaming query to read the Parquet file.
+        ...     q = spark.readStream.schema(
+        ...         "id LONG").parquet(d).writeStream.format("console").start()
+        ...     time.sleep(3)
+        ...     q.stop()
         """
         self._set_opts(
             mergeSchema=mergeSchema,
@@ -378,7 +527,10 @@ class DataStreamReader(OptionUtils):
         if isinstance(path, str):
             return self._df(self._jreader.parquet(path))
         else:
-            raise TypeError("path can be only a single string")
+            raise PySparkTypeError(
+                error_class="NOT_STR",
+                message_parameters={"arg_name": "path", "arg_type": type(path).__name__},
+            )
 
     def text(
         self,
@@ -397,6 +549,9 @@ class DataStreamReader(OptionUtils):
         By default, each line in the text file is a new row in the resulting DataFrame.
 
         .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
 
         Parameters
         ----------
@@ -418,11 +573,19 @@ class DataStreamReader(OptionUtils):
 
         Examples
         --------
-        >>> text_sdf = spark.readStream.text(tempfile.mkdtemp())
-        >>> text_sdf.isStreaming
-        True
-        >>> "value" in str(text_sdf.schema)
-        True
+        Load a data stream from a temporary text file.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="text") as d:
+        ...     # Write a temporary text file to read it.
+        ...     spark.createDataFrame(
+        ...         [("hello",), ("this",)]).write.mode("overwrite").format("text").save(d)
+        ...
+        ...     # Start a streaming query to read the text file.
+        ...     q = spark.readStream.text(d).writeStream.format("console").start()
+        ...     time.sleep(3)
+        ...     q.stop()
         """
         self._set_opts(
             wholetext=wholetext,
@@ -433,7 +596,10 @@ class DataStreamReader(OptionUtils):
         if isinstance(path, str):
             return self._df(self._jreader.text(path))
         else:
-            raise TypeError("path can be only a single string")
+            raise PySparkTypeError(
+                error_class="NOT_STR",
+                message_parameters={"arg_name": "path", "arg_type": type(path).__name__},
+            )
 
     def csv(
         self,
@@ -485,6 +651,9 @@ class DataStreamReader(OptionUtils):
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Other Parameters
         ----------------
         Extra options
@@ -500,11 +669,20 @@ class DataStreamReader(OptionUtils):
 
         Examples
         --------
-        >>> csv_sdf = spark.readStream.csv(tempfile.mkdtemp(), schema = sdf_schema)
-        >>> csv_sdf.isStreaming
-        True
-        >>> csv_sdf.schema == sdf_schema
-        True
+        Load a data stream from a temporary CSV file.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="csv") as d:
+        ...     # Write a temporary text file to read it.
+        ...     spark.createDataFrame([(1, "2"),]).write.mode("overwrite").format("csv").save(d)
+        ...
+        ...     # Start a streaming query to read the CSV file.
+        ...     q = spark.readStream.schema(
+        ...         "col0 INT, col1 STRING"
+        ...     ).format("csv").load(d).writeStream.format("console").start()
+        ...     time.sleep(3)
+        ...     q.stop()
         """
         self._set_opts(
             schema=schema,
@@ -541,13 +719,118 @@ class DataStreamReader(OptionUtils):
         if isinstance(path, str):
             return self._df(self._jreader.csv(path))
         else:
-            raise TypeError("path can be only a single string")
+            raise PySparkTypeError(
+                error_class="NOT_STR",
+                message_parameters={"arg_name": "path", "arg_type": type(path).__name__},
+            )
+
+    def xml(
+        self,
+        path: str,
+        rowTag: Optional[str] = None,
+        schema: Optional[Union[StructType, str]] = None,
+        excludeAttribute: Optional[Union[bool, str]] = None,
+        attributePrefix: Optional[str] = None,
+        valueTag: Optional[str] = None,
+        ignoreSurroundingSpaces: Optional[Union[bool, str]] = None,
+        rowValidationXSDPath: Optional[str] = None,
+        ignoreNamespace: Optional[Union[bool, str]] = None,
+        wildcardColName: Optional[str] = None,
+        encoding: Optional[str] = None,
+        inferSchema: Optional[Union[bool, str]] = None,
+        nullValue: Optional[str] = None,
+        dateFormat: Optional[str] = None,
+        timestampFormat: Optional[str] = None,
+        mode: Optional[str] = None,
+        columnNameOfCorruptRecord: Optional[str] = None,
+        multiLine: Optional[Union[bool, str]] = None,
+        samplingRatio: Optional[Union[float, str]] = None,
+        locale: Optional[str] = None,
+    ) -> "DataFrame":
+        r"""Loads a XML file stream and returns the result as a :class:`DataFrame`.
+
+        If the ``schema`` parameter is not specified, this function goes
+        through the input once to determine the input schema.
+
+        Parameters
+        ----------
+        path : str
+            string for input path.
+        schema : :class:`pyspark.sql.types.StructType` or str, optional
+            an optional :class:`pyspark.sql.types.StructType` for the input schema
+            or a DDL-formatted string (For example ``col0 INT, col1 DOUBLE``).
+
+        .. versionadded:: 4.0.0
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-xml.html#data-source-option>`_
+            in the version you use.
+
+            .. # noqa
+
+        Notes
+        -----
+        This API is evolving.
+
+        Examples
+        --------
+        Write a DataFrame into a XML file and read it back.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="xml") as d:
+        ...     # Write a DataFrame into a XML file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.mode("overwrite").option("rowTag", "person").xml(d)
+        ...
+        ...     # Start a streaming query to read the XML file.
+        ...     q = spark.readStream.schema(
+        ...         "age INT, name STRING"
+        ...     ).xml(d, rowTag="person").writeStream.format("console").start()
+        ...     time.sleep(3)
+        ...     q.stop()
+        """
+        self._set_opts(
+            rowTag=rowTag,
+            schema=schema,
+            excludeAttribute=excludeAttribute,
+            attributePrefix=attributePrefix,
+            valueTag=valueTag,
+            ignoreSurroundingSpaces=ignoreSurroundingSpaces,
+            rowValidationXSDPath=rowValidationXSDPath,
+            ignoreNamespace=ignoreNamespace,
+            wildcardColName=wildcardColName,
+            encoding=encoding,
+            inferSchema=inferSchema,
+            nullValue=nullValue,
+            dateFormat=dateFormat,
+            timestampFormat=timestampFormat,
+            mode=mode,
+            columnNameOfCorruptRecord=columnNameOfCorruptRecord,
+            multiLine=multiLine,
+            samplingRatio=samplingRatio,
+            locale=locale,
+        )
+        if isinstance(path, str):
+            return self._df(self._jreader.xml(path))
+        else:
+            raise PySparkTypeError(
+                error_class="NOT_STR",
+                message_parameters={"arg_name": "path", "arg_type": type(path).__name__},
+            )
 
     def table(self, tableName: str) -> "DataFrame":
         """Define a Streaming DataFrame on a Table. The DataSource corresponding to the table should
         support streaming mode.
 
         .. versionadded:: 3.1.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
 
         Parameters
         ----------
@@ -564,12 +847,30 @@ class DataStreamReader(OptionUtils):
 
         Examples
         --------
-        >>> spark.readStream.table('input_table') # doctest: +SKIP
+        Load a data stream from a table.
+
+        >>> import tempfile
+        >>> import time
+        >>> _ = spark.sql("DROP TABLE IF EXISTS my_table")
+        >>> with tempfile.TemporaryDirectory(prefix="table") as d:
+        ...     # Create a table with Rate source.
+        ...     q1 = spark.readStream.format("rate").load().writeStream.toTable(
+        ...         "my_table", checkpointLocation=d)
+        ...
+        ...     # Read the table back and print out in the console.
+        ...     q2 = spark.readStream.table("my_table").writeStream.format("console").start()
+        ...     time.sleep(3)
+        ...     q1.stop()
+        ...     q2.stop()
+        ...     _ = spark.sql("DROP TABLE my_table")
         """
         if isinstance(tableName, str):
             return self._df(self._jreader.table(tableName))
         else:
-            raise TypeError("tableName can be only a single string")
+            raise PySparkTypeError(
+                error_class="NOT_STR",
+                message_parameters={"arg_name": "tableName", "arg_type": type(tableName).__name__},
+            )
 
 
 class DataStreamWriter:
@@ -581,9 +882,25 @@ class DataStreamWriter:
 
     .. versionadded:: 2.0.0
 
+    .. versionchanged:: 3.5.0
+        Supports Spark Connect.
+
     Notes
     -----
     This API is evolving.
+
+    Examples
+    --------
+    The example below uses Rate source that generates rows continuously.
+    After that, we operate a modulo by 3, and then writes the stream out to the console.
+    The streaming query stops in 3 seconds.
+
+    >>> import time
+    >>> df = spark.readStream.format("rate").load()
+    >>> df = df.selectExpr("value % 3 as v")
+    >>> q = df.writeStream.format("console").start()
+    >>> time.sleep(3)
+    >>> q.stop()
     """
 
     def __init__(self, df: "DataFrame") -> None:
@@ -598,6 +915,9 @@ class DataStreamWriter:
         """Specifies how data of a streaming DataFrame/Dataset is written to a streaming sink.
 
         .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
 
         Options include:
 
@@ -615,10 +935,24 @@ class DataStreamWriter:
 
         Examples
         --------
-        >>> writer = sdf.writeStream.outputMode('append')
+        >>> df = spark.readStream.format("rate").load()
+        >>> df.writeStream.outputMode('append')
+        <...streaming.readwriter.DataStreamWriter object ...>
+
+        The example below uses Complete mode that the entire aggregated counts are printed out.
+
+        >>> import time
+        >>> df = spark.readStream.format("rate").option("rowsPerSecond", 10).load()
+        >>> df = df.groupby().count()
+        >>> q = df.writeStream.outputMode("complete").format("console").start()
+        >>> time.sleep(3)
+        >>> q.stop()
         """
         if not outputMode or type(outputMode) != str or len(outputMode.strip()) == 0:
-            raise ValueError("The output mode must be a non-empty string. Got: %s" % outputMode)
+            raise PySparkValueError(
+                error_class="VALUE_NOT_NON_EMPTY_STR",
+                message_parameters={"arg_name": "outputMode", "arg_value": str(outputMode)},
+            )
         self._jwrite = self._jwrite.outputMode(outputMode)
         return self
 
@@ -626,6 +960,9 @@ class DataStreamWriter:
         """Specifies the underlying output data source.
 
         .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
 
         Parameters
         ----------
@@ -638,7 +975,26 @@ class DataStreamWriter:
 
         Examples
         --------
-        >>> writer = sdf.writeStream.format('json')
+        >>> df = spark.readStream.format("rate").load()
+        >>> df.writeStream.format("text")
+        <...streaming.readwriter.DataStreamWriter object ...>
+
+        This API allows to configure the source to write. The example below writes a CSV
+        file from Rate source in a streaming manner.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="format1") as d:
+        ...     with tempfile.TemporaryDirectory(prefix="format2") as cp:
+        ...         df = spark.readStream.format("rate").load()
+        ...         q = df.writeStream.format("csv").option("checkpointLocation", cp).start(d)
+        ...         time.sleep(5)
+        ...         q.stop()
+        ...         spark.read.schema("timestamp TIMESTAMP, value STRING").csv(d).show()
+        +...---------+-----+
+        |...timestamp|value|
+        +...---------+-----+
+        ...
         """
         self._jwrite = self._jwrite.format(source)
         return self
@@ -648,9 +1004,28 @@ class DataStreamWriter:
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Notes
         -----
         This API is evolving.
+
+        Examples
+        --------
+        >>> df = spark.readStream.format("rate").load()
+        >>> df.writeStream.option("x", 1)
+        <...streaming.readwriter.DataStreamWriter object ...>
+
+        The example below specifies 'numRows' option to Console source in order to print
+        3 rows for every batch.
+
+        >>> import time
+        >>> q = spark.readStream.format(
+        ...     "rate").option("rowsPerSecond", 10).load().writeStream.format(
+        ...         "console").option("numRows", 3).start()
+        >>> time.sleep(3)
+        >>> q.stop()
         """
         self._jwrite = self._jwrite.option(key, to_str(value))
         return self
@@ -660,9 +1035,33 @@ class DataStreamWriter:
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Notes
         -----
         This API is evolving.
+
+        Examples
+        --------
+        >>> df = spark.readStream.format("rate").load()
+        >>> df.writeStream.option("x", 1)
+        <...streaming.readwriter.DataStreamWriter object ...>
+
+        Specify options in a dictionary.
+
+        >>> df.writeStream.options(**{"k1": "v1", "k2": "v2"})
+        <...streaming.readwriter.DataStreamWriter object ...>
+
+        The example below specifies 'numRows' and 'truncate' options to Console source in order
+        to print 3 rows for every batch without truncating the results.
+
+        >>> import time
+        >>> q = spark.readStream.format(
+        ...     "rate").option("rowsPerSecond", 10).load().writeStream.format(
+        ...         "console").options(numRows=3, truncate=False).start()
+        >>> time.sleep(3)
+        >>> q.stop()
         """
         for k in options:
             self._jwrite = self._jwrite.option(k, to_str(options[k]))
@@ -684,6 +1083,9 @@ class DataStreamWriter:
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Parameters
         ----------
         cols : str or list
@@ -692,6 +1094,29 @@ class DataStreamWriter:
         Notes
         -----
         This API is evolving.
+
+        Examples
+        --------
+        >>> df = spark.readStream.format("rate").load()
+        >>> df.writeStream.partitionBy("value")
+        <...streaming.readwriter.DataStreamWriter object ...>
+
+        Partition-by timestamp column from Rate source.
+
+        >>> import tempfile
+        >>> import time
+        >>> with tempfile.TemporaryDirectory(prefix="partitionBy1") as d:
+        ...     with tempfile.TemporaryDirectory(prefix="partitionBy2") as cp:
+        ...         df = spark.readStream.format("rate").option("rowsPerSecond", 10).load()
+        ...         q = df.writeStream.partitionBy(
+        ...             "timestamp").format("parquet").option("checkpointLocation", cp).start(d)
+        ...         time.sleep(5)
+        ...         q.stop()
+        ...         spark.read.schema(df.schema).parquet(d).show()
+        +...---------+-----+
+        |...timestamp|value|
+        +...---------+-----+
+        ...
         """
         if len(cols) == 1 and isinstance(cols[0], (list, tuple)):
             cols = cols[0]
@@ -705,6 +1130,9 @@ class DataStreamWriter:
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Parameters
         ----------
         queryName : str
@@ -716,10 +1144,18 @@ class DataStreamWriter:
 
         Examples
         --------
-        >>> writer = sdf.writeStream.queryName('streaming_query')
+        >>> import time
+        >>> df = spark.readStream.format("rate").load()
+        >>> q = df.writeStream.queryName("streaming_query").format("console").start()
+        >>> q.stop()
+        >>> q.name
+        'streaming_query'
         """
         if not queryName or type(queryName) != str or len(queryName.strip()) == 0:
-            raise ValueError("The queryName must be a non-empty string. Got: %s" % queryName)
+            raise PySparkValueError(
+                error_class="VALUE_NOT_NON_EMPTY_STR",
+                message_parameters={"arg_name": "queryName", "arg_value": str(queryName)},
+            )
         self._jwrite = self._jwrite.queryName(queryName)
         return self
 
@@ -752,6 +1188,9 @@ class DataStreamWriter:
 
         .. versionadded:: 2.0.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Parameters
         ----------
         processingTime : str, optional
@@ -775,28 +1214,46 @@ class DataStreamWriter:
 
         Examples
         --------
-        >>> # trigger the query for execution every 5 seconds
-        >>> writer = sdf.writeStream.trigger(processingTime='5 seconds')
-        >>> # trigger the query for just once batch of data
-        >>> writer = sdf.writeStream.trigger(once=True)
-        >>> # trigger the query for execution every 5 seconds
-        >>> writer = sdf.writeStream.trigger(continuous='5 seconds')
-        >>> # trigger the query for reading all available data with multiple batches
-        >>> writer = sdf.writeStream.trigger(availableNow=True)
+        >>> df = spark.readStream.format("rate").load()
+
+        Trigger the query for execution every 5 seconds
+
+        >>> df.writeStream.trigger(processingTime='5 seconds')
+        <...streaming.readwriter.DataStreamWriter object ...>
+
+        Trigger the query for execution every 5 seconds
+
+        >>> df.writeStream.trigger(continuous='5 seconds')
+        <...streaming.readwriter.DataStreamWriter object ...>
+
+        Trigger the query for reading all available data with multiple batches
+
+        >>> df.writeStream.trigger(availableNow=True)
+        <...streaming.readwriter.DataStreamWriter object ...>
         """
         params = [processingTime, once, continuous, availableNow]
 
         if params.count(None) == 4:
-            raise ValueError("No trigger provided")
+            raise PySparkValueError(
+                error_class="ONLY_ALLOW_SINGLE_TRIGGER",
+                message_parameters={},
+            )
         elif params.count(None) < 3:
-            raise ValueError("Multiple triggers not allowed.")
+            raise PySparkValueError(
+                error_class="ONLY_ALLOW_SINGLE_TRIGGER",
+                message_parameters={},
+            )
 
         jTrigger = None
         assert self._spark._sc._jvm is not None
         if processingTime is not None:
             if type(processingTime) != str or len(processingTime.strip()) == 0:
-                raise ValueError(
-                    "Value for processingTime must be a non empty string. Got: %s" % processingTime
+                raise PySparkValueError(
+                    error_class="VALUE_NOT_NON_EMPTY_STR",
+                    message_parameters={
+                        "arg_name": "processingTime",
+                        "arg_value": str(processingTime),
+                    },
                 )
             interval = processingTime.strip()
             jTrigger = self._spark._sc._jvm.org.apache.spark.sql.streaming.Trigger.ProcessingTime(
@@ -805,13 +1262,18 @@ class DataStreamWriter:
 
         elif once is not None:
             if once is not True:
-                raise ValueError("Value for once must be True. Got: %s" % once)
+                raise PySparkValueError(
+                    error_class="VALUE_NOT_TRUE",
+                    message_parameters={"arg_name": "once", "arg_value": str(once)},
+                )
+
             jTrigger = self._spark._sc._jvm.org.apache.spark.sql.streaming.Trigger.Once()
 
         elif continuous is not None:
             if type(continuous) != str or len(continuous.strip()) == 0:
-                raise ValueError(
-                    "Value for continuous must be a non empty string. Got: %s" % continuous
+                raise PySparkValueError(
+                    error_class="VALUE_NOT_NON_EMPTY_STR",
+                    message_parameters={"arg_name": "continuous", "arg_value": str(continuous)},
                 )
             interval = continuous.strip()
             jTrigger = self._spark._sc._jvm.org.apache.spark.sql.streaming.Trigger.Continuous(
@@ -819,11 +1281,97 @@ class DataStreamWriter:
             )
         else:
             if availableNow is not True:
-                raise ValueError("Value for availableNow must be True. Got: %s" % availableNow)
+                raise PySparkValueError(
+                    error_class="VALUE_NOT_TRUE",
+                    message_parameters={"arg_name": "availableNow", "arg_value": str(availableNow)},
+                )
             jTrigger = self._spark._sc._jvm.org.apache.spark.sql.streaming.Trigger.AvailableNow()
 
         self._jwrite = self._jwrite.trigger(jTrigger)
         return self
+
+    @staticmethod
+    def _construct_foreach_function(
+        f: Union[Callable[[Row], None], "SupportsProcess"]
+    ) -> Callable[[Any, Iterator], Iterator]:
+        from pyspark.taskcontext import TaskContext
+
+        if callable(f):
+            # The provided object is a callable function that is supposed to be called on each row.
+            # Construct a function that takes an iterator and calls the provided function on each
+            # row.
+            def func_without_process(_: Any, iterator: Iterator) -> Iterator:
+                for x in iterator:
+                    f(x)
+                return iter([])
+
+            return func_without_process
+
+        else:
+            # The provided object is not a callable function. Then it is expected to have a
+            # 'process(row)' method, and optional 'open(partition_id, epoch_id)' and
+            # 'close(error)' methods.
+
+            if not hasattr(f, "process"):
+                raise PySparkAttributeError(
+                    error_class="ATTRIBUTE_NOT_CALLABLE",
+                    message_parameters={"attr_name": "process", "obj_name": "f"},
+                )
+
+            if not callable(getattr(f, "process")):
+                raise PySparkAttributeError(
+                    error_class="ATTRIBUTE_NOT_CALLABLE",
+                    message_parameters={"attr_name": "process", "obj_name": "f"},
+                )
+
+            def doesMethodExist(method_name: str) -> bool:
+                exists = hasattr(f, method_name)
+                if exists and not callable(getattr(f, method_name)):
+                    raise PySparkAttributeError(
+                        error_class="ATTRIBUTE_NOT_CALLABLE",
+                        message_parameters={"attr_name": method_name, "obj_name": "f"},
+                    )
+                return exists
+
+            open_exists = doesMethodExist("open")
+            close_exists = doesMethodExist("close")
+
+            def func_with_open_process_close(partition_id: Any, iterator: Iterator) -> Iterator:
+                epoch_id = cast(TaskContext, TaskContext.get()).getLocalProperty(
+                    "streaming.sql.batchId"
+                )
+                if epoch_id:
+                    int_epoch_id = int(epoch_id)
+                else:
+                    raise PySparkRuntimeError(
+                        error_class="CANNOT_GET_BATCH_ID",
+                        message_parameters={"obj_name": "TaskContext"},
+                    )
+
+                # Check if the data should be processed
+                should_process = True
+                if open_exists:
+                    should_process = f.open(  # type: ignore[attr-defined]
+                        partition_id, int_epoch_id
+                    )
+
+                error = None
+
+                try:
+                    if should_process:
+                        for x in iterator:
+                            f.process(x)
+                except Exception as ex:
+                    error = ex
+                finally:
+                    if close_exists:
+                        f.close(error)  # type: ignore[attr-defined]
+                    if error:
+                        raise error
+
+                return iter([])
+
+            return func_with_open_process_close
 
     @overload
     def foreach(self, f: Callable[[Row], None]) -> "DataStreamWriter":
@@ -902,99 +1450,49 @@ class DataStreamWriter:
 
         .. versionadded:: 2.4.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Notes
         -----
         This API is evolving.
 
         Examples
         --------
-        >>> # Print every row using a function
+        >>> import time
+        >>> df = spark.readStream.format("rate").load()
+
+        Print every row using a function
+
         >>> def print_row(row):
         ...     print(row)
         ...
-        >>> writer = sdf.writeStream.foreach(print_row)
-        >>> # Print every row using a object with process() method
+        >>> q = df.writeStream.foreach(print_row).start()
+        >>> time.sleep(3)
+        >>> q.stop()
+
+        Print every row using a object with process() method
+
         >>> class RowPrinter:
         ...     def open(self, partition_id, epoch_id):
         ...         print("Opened %d, %d" % (partition_id, epoch_id))
         ...         return True
+        ...
         ...     def process(self, row):
         ...         print(row)
+        ...
         ...     def close(self, error):
         ...         print("Closed with error: %s" % str(error))
         ...
-        >>> writer = sdf.writeStream.foreach(RowPrinter())
+        >>> q = df.writeStream.foreach(print_row).start()
+        >>> time.sleep(3)
+        >>> q.stop()
         """
 
         from pyspark.rdd import _wrap_function
         from pyspark.serializers import CPickleSerializer, AutoBatchedSerializer
-        from pyspark.taskcontext import TaskContext
 
-        if callable(f):
-            # The provided object is a callable function that is supposed to be called on each row.
-            # Construct a function that takes an iterator and calls the provided function on each
-            # row.
-            def func_without_process(_: Any, iterator: Iterator) -> Iterator:
-                for x in iterator:
-                    f(x)  # type: ignore[operator]
-                return iter([])
-
-            func = func_without_process
-
-        else:
-            # The provided object is not a callable function. Then it is expected to have a
-            # 'process(row)' method, and optional 'open(partition_id, epoch_id)' and
-            # 'close(error)' methods.
-
-            if not hasattr(f, "process"):
-                raise AttributeError("Provided object does not have a 'process' method")
-
-            if not callable(getattr(f, "process")):
-                raise TypeError("Attribute 'process' in provided object is not callable")
-
-            def doesMethodExist(method_name: str) -> bool:
-                exists = hasattr(f, method_name)
-                if exists and not callable(getattr(f, method_name)):
-                    raise TypeError(
-                        "Attribute '%s' in provided object is not callable" % method_name
-                    )
-                return exists
-
-            open_exists = doesMethodExist("open")
-            close_exists = doesMethodExist("close")
-
-            def func_with_open_process_close(partition_id: Any, iterator: Iterator) -> Iterator:
-                epoch_id = cast(TaskContext, TaskContext.get()).getLocalProperty(
-                    "streaming.sql.batchId"
-                )
-                if epoch_id:
-                    int_epoch_id = int(epoch_id)
-                else:
-                    raise RuntimeError("Could not get batch id from TaskContext")
-
-                # Check if the data should be processed
-                should_process = True
-                if open_exists:
-                    should_process = f.open(partition_id, int_epoch_id)  # type: ignore[union-attr]
-
-                error = None
-
-                try:
-                    if should_process:
-                        for x in iterator:
-                            cast("SupportsProcess", f).process(x)
-                except Exception as ex:
-                    error = ex
-                finally:
-                    if close_exists:
-                        f.close(error)  # type: ignore[union-attr]
-                    if error:
-                        raise error
-
-                return iter([])
-
-            func = func_with_open_process_close  # type: ignore[assignment]
-
+        func = self._construct_foreach_function(f)
         serializer = AutoBatchedSerializer(CPickleSerializer())
         wrapped_func = _wrap_function(self._spark._sc, func, serializer, serializer)
         assert self._spark._sc._jvm is not None
@@ -1019,16 +1517,29 @@ class DataStreamWriter:
 
         .. versionadded:: 2.4.0
 
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
         Notes
         -----
         This API is evolving.
+        This function behaves differently in Spark Connect mode. See examples.
+        In Connect, the provided function doesn't have access to variables defined outside of it.
 
         Examples
         --------
+        >>> import time
+        >>> df = spark.readStream.format("rate").load()
+        >>> my_value = -1
         >>> def func(batch_df, batch_id):
+        ...     global my_value
+        ...     my_value = 100
         ...     batch_df.collect()
         ...
-        >>> writer = sdf.writeStream.foreachBatch(func)
+        >>> q = df.writeStream.foreachBatch(func).start()
+        >>> time.sleep(3)
+        >>> q.stop()
+        >>> # if in Spark Connect, my_value = -1, else my_value = 100
         """
 
         from pyspark.java_gateway import ensure_callback_server_started
@@ -1058,6 +1569,9 @@ class DataStreamWriter:
         ``spark.sql.sources.default`` will be used.
 
         .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
 
         Parameters
         ----------
@@ -1090,21 +1604,28 @@ class DataStreamWriter:
 
         Examples
         --------
-        >>> sq = sdf.writeStream.format('memory').queryName('this_query').start()
-        >>> sq.isActive
+        >>> df = spark.readStream.format("rate").load()
+
+        Basic example.
+
+        >>> q = df.writeStream.format('memory').queryName('this_query').start()
+        >>> q.isActive
         True
-        >>> sq.name
+        >>> q.name
         'this_query'
-        >>> sq.stop()
-        >>> sq.isActive
+        >>> q.stop()
+        >>> q.isActive
         False
-        >>> sq = sdf.writeStream.trigger(processingTime='5 seconds').start(
+
+        Example with using other parameters with a trigger.
+
+        >>> q = df.writeStream.trigger(processingTime='5 seconds').start(
         ...     queryName='that_query', outputMode="append", format='memory')
-        >>> sq.name
+        >>> q.name
         'that_query'
-        >>> sq.isActive
+        >>> q.isActive
         True
-        >>> sq.stop()
+        >>> q.stop()
         """
         self.options(**options)
         if outputMode is not None:
@@ -1136,6 +1657,9 @@ class DataStreamWriter:
         The returned :class:`StreamingQuery` object can be used to interact with the stream.
 
         .. versionadded:: 3.1.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
 
         Parameters
         ----------
@@ -1176,15 +1700,28 @@ class DataStreamWriter:
 
         Examples
         --------
-        >>> sdf.writeStream.format('parquet').queryName('query').toTable('output_table')
-        ... # doctest: +SKIP
+        Save a data stream to a table.
 
-        >>> sdf.writeStream.trigger(processingTime='5 seconds').toTable(
-        ...     'output_table',
-        ...     queryName='that_query',
-        ...     outputMode="append",
-        ...     format='parquet',
-        ...     checkpointLocation='/tmp/checkpoint') # doctest: +SKIP
+        >>> import tempfile
+        >>> import time
+        >>> _ = spark.sql("DROP TABLE IF EXISTS my_table2")
+        >>> with tempfile.TemporaryDirectory(prefix="toTable") as d:
+        ...     # Create a table with Rate source.
+        ...     q = spark.readStream.format("rate").option(
+        ...         "rowsPerSecond", 10).load().writeStream.toTable(
+        ...             "my_table2",
+        ...             queryName='that_query',
+        ...             outputMode="append",
+        ...             format='parquet',
+        ...             checkpointLocation=d)
+        ...     time.sleep(3)
+        ...     q.stop()
+        ...     spark.read.table("my_table2").show()
+        ...     _ = spark.sql("DROP TABLE my_table2")
+        +...---------+-----+
+        |...timestamp|value|
+        +...---------+-----+
+        ...
         """
         self.options(**options)
         if outputMode is not None:
@@ -1201,23 +1738,17 @@ class DataStreamWriter:
 def _test() -> None:
     import doctest
     import os
-    import tempfile
     from pyspark.sql import SparkSession
     import pyspark.sql.streaming.readwriter
-    from py4j.protocol import Py4JError
 
     os.chdir(os.environ["SPARK_HOME"])
 
     globs = pyspark.sql.streaming.readwriter.__dict__.copy()
-    try:
-        spark = SparkSession._getActiveSessionOrCreate()
-    except Py4JError:  # noqa: F821
-        spark = SparkSession(sc)  # type: ignore[name-defined] # noqa: F821
-
-    globs["tempfile"] = tempfile
-    globs["spark"] = spark
-    globs["sdf"] = spark.readStream.format("text").load("python/test_support/sql/streaming")
-    globs["sdf_schema"] = StructType([StructField("data", StringType(), True)])
+    globs["spark"] = (
+        SparkSession.builder.master("local[4]")
+        .appName("sql.streaming.readwriter tests")
+        .getOrCreate()
+    )
 
     (failure_count, test_count) = doctest.testmod(
         pyspark.sql.streaming.readwriter,

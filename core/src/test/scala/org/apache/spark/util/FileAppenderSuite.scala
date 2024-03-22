@@ -34,10 +34,10 @@ import org.mockito.Mockito.{atLeast, mock, verify, when}
 import org.scalatest.BeforeAndAfter
 
 import org.apache.spark.{SparkConf, SparkFunSuite}
-import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.config
 import org.apache.spark.util.logging.{FileAppender, RollingFileAppender, SizeBasedRollingPolicy, TimeBasedRollingPolicy}
 
-class FileAppenderSuite extends SparkFunSuite with BeforeAndAfter with Logging {
+class FileAppenderSuite extends SparkFunSuite with BeforeAndAfter {
 
   val testFile = new File(Utils.createTempDir(), "FileAppenderSuite-test").getAbsoluteFile
 
@@ -192,9 +192,9 @@ class FileAppenderSuite extends SparkFunSuite with BeforeAndAfter with Logging {
 
     // verify whether the earliest file has been deleted
     val rolledOverFiles = allGeneratedFiles.filter { _ != testFile.toString }.toArray.sorted
-    logInfo(s"All rolled over files generated:${rolledOverFiles.size}\n" +
+    logInfo(s"All rolled over files generated:${rolledOverFiles.length}\n" +
       rolledOverFiles.mkString("\n"))
-    assert(rolledOverFiles.size > 2)
+    assert(rolledOverFiles.length > 2)
     val earliestRolledOverFile = rolledOverFiles.head
     val existingRolledOverFiles = RollingFileAppender.getSortedRolledOverFiles(
       testFile.getParentFile.toString, testFile.getName).map(_.toString)
@@ -340,7 +340,7 @@ class FileAppenderSuite extends SparkFunSuite with BeforeAndAfter with Logging {
 
       // Make sure no IOException errors have been logged as a result of appender closing gracefully
       verify(mockAppender, atLeast(0)).append(loggingEventCaptor.capture)
-      import scala.collection.JavaConverters._
+      import scala.jdk.CollectionConverters._
       loggingEventCaptor.getAllValues.asScala.foreach { loggingEvent =>
         assert(loggingEvent.getThrown === null
           || !loggingEvent.getThrown.isInstanceOf[IOException])

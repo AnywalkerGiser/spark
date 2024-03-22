@@ -23,12 +23,12 @@ import java.time.{Duration, Period}
 
 import org.apache.hadoop.fs.{FileAlreadyExistsException, FSDataOutputStream, Path, RawLocalFileSystem}
 
-import org.apache.spark.SparkException
+import org.apache.spark.{SparkArithmeticException, SparkException}
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.parser.ParseException
-import org.apache.spark.sql.errors.QueryCompilationErrors
+import org.apache.spark.sql.connector.{FakeV2Provider, FakeV2ProviderWithCustomSchema}
 import org.apache.spark.sql.execution.datasources.DataSourceUtils
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.SQLConf.PartitionOverwriteMode
@@ -53,7 +53,7 @@ case class SimpleInsert(userSpecifiedSchema: StructType)(@transient val sparkSes
   override def schema: StructType = userSpecifiedSchema
 
   override def insert(input: DataFrame, overwrite: Boolean): Unit = {
-    input.collect
+    input.collect()
   }
 }
 
@@ -113,10 +113,47 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
         """.stripMargin)
       sparkContext.parallelize(1 to 10).toDF("a").createOrReplaceTempView("t2")
 
-      val message = intercept[AnalysisException] {
-        sql("INSERT INTO TABLE t1 SELECT a FROM t2")
-      }.getMessage
-      assert(message.contains("does not allow insertion"))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("INSERT INTO TABLE t1 SELECT a FROM t2")
+        },
+        errorClass = "UNSUPPORTED_INSERT.NOT_ALLOWED",
+        parameters = Map("relationId" -> "`SimpleScan(1,10)`")
+      )
+    }
+  }
+
+  test("UNSUPPORTED_INSERT.RDD_BASED: Inserting into an RDD-based table is not allowed") {
+    import testImplicits._
+    withTempView("t1") {
+      sparkContext.parallelize(1 to 10).toDF("a").createOrReplaceTempView("t1")
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("INSERT INTO TABLE t1 SELECT a FROM t1")
+        },
+        errorClass = "UNSUPPORTED_INSERT.RDD_BASED",
+        parameters = Map.empty
+      )
+    }
+  }
+
+  test("UNSUPPORTED_INSERT.READ_FROM: Cannot insert into table that is also being read from") {
+    withTempView("t1") {
+      sql(
+        """
+          |CREATE TEMPORARY VIEW t1
+          |USING org.apache.spark.sql.sources.SimpleScanSource
+          |OPTIONS (
+          |  From '1',
+          |  To '10')
+        """.stripMargin)
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("INSERT INTO TABLE t1 SELECT * FROM t1")
+        },
+        errorClass = "UNSUPPORTED_INSERT.READ_FROM",
+        parameters = Map("relationId" -> "`SimpleScan(1,10)`")
+      )
     }
   }
 
@@ -139,17 +176,6 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     checkAnswer(
       sql("SELECT a, b FROM jsonTable"),
       (1 to 10).map(i => Row(i * 4, s"${i * 6}"))
-    )
-  }
-
-  test("SELECT clause generating a different number of columns is not allowed.") {
-    val message = intercept[AnalysisException] {
-      sql(
-        s"""
-        |INSERT OVERWRITE TABLE jsonTable SELECT a FROM jt
-      """.stripMargin)
-    }.getMessage
-    assert(message.contains("target table has 2 column(s) but the inserted data has 1 column(s)")
     )
   }
 
@@ -263,15 +289,12 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
   }
 
   test("it is not allowed to write to a table while querying it.") {
-    val message = intercept[AnalysisException] {
-      sql(
-        s"""
-        |INSERT OVERWRITE TABLE jsonTable SELECT a, b FROM jsonTable
-      """.stripMargin)
-    }.getMessage
-    assert(
-      message.contains("Cannot overwrite a path that is also being read from."),
-      "INSERT OVERWRITE to a table while querying it should not be allowed.")
+    checkErrorMatchPVals(
+      exception = intercept[AnalysisException] {
+        sql("INSERT OVERWRITE TABLE jsonTable SELECT a, b FROM jsonTable")
+      },
+      errorClass = "UNSUPPORTED_OVERWRITE.PATH",
+      parameters = Map("path" -> ".*"))
   }
 
   test("SPARK-30112: it is allowed to write to a table while querying it for " +
@@ -307,16 +330,16 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
             checkAnswer(spark.table("insertTable"),
               Row(2, 1, 1) :: Row(3, 1, 2) :: Row(4, 1, 3) :: Nil)
           } else {
-            val message = intercept[AnalysisException] {
-              sql(
-                """
-                  |INSERT OVERWRITE TABLE insertTable PARTITION(part1=1, part2)
-                  |SELECT i + 1, part2 FROM insertTable
-                """.stripMargin)
-            }.getMessage
-            assert(
-              message.contains("Cannot overwrite a path that is also being read from."),
-              "INSERT OVERWRITE to a table while querying it should not be allowed.")
+            checkError(
+              exception = intercept[AnalysisException] {
+                sql(
+                  """
+                    |INSERT OVERWRITE TABLE insertTable PARTITION(part1=1, part2)
+                    |SELECT i + 1, part2 FROM insertTable
+                  """.stripMargin)
+              },
+              errorClass = "UNSUPPORTED_OVERWRITE.TABLE",
+              parameters = Map("table" -> "`spark_catalog`.`default`.`inserttable`"))
           }
         }
       }
@@ -391,16 +414,12 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       (1 to 10).map(Row(_)).toSeq
     )
 
-    val message = intercept[AnalysisException] {
-      sql(
-        s"""
-        |INSERT OVERWRITE TABLE oneToTen SELECT CAST(a AS INT) FROM jt
-        """.stripMargin)
-    }.getMessage
-    assert(
-      message.contains("does not allow insertion."),
-      "It is not allowed to insert into a table that is not an InsertableRelation."
-    )
+    checkError(
+      exception = intercept[AnalysisException] {
+        sql("INSERT OVERWRITE TABLE oneToTen SELECT CAST(a AS INT) FROM jt")
+      },
+      errorClass = "UNSUPPORTED_INSERT.NOT_ALLOWED",
+      parameters = Map("relationId" -> "`SimpleScan(1,10)`"))
 
     spark.catalog.dropTempView("oneToTen")
   }
@@ -415,7 +434,7 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       )
 
       sql(s"CREATE TABLE target2(a INT, b STRING) USING JSON")
-      val e = sql(
+      sql(
         """
           |WITH tbl AS (SELECT * FROM jt)
           |FROM tbl
@@ -462,7 +481,7 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
 
       val v1 =
         s"""
-           | INSERT OVERWRITE DIRECTORY '${path}'
+           | INSERT OVERWRITE DIRECTORY '$path'
            | USING json
            | OPTIONS (a 1, b 0.1, c TRUE)
            | SELECT 1 as a, 'c' as b
@@ -484,7 +503,7 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
         s"""
            | INSERT OVERWRITE DIRECTORY
            | USING json
-           | OPTIONS ('path' '${path}')
+           | OPTIONS ('path' '$path')
            | SELECT 1 as a, 'c' as b
          """.stripMargin
 
@@ -499,16 +518,18 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
   test("Insert overwrite directory using Hive serde without turning on Hive support") {
     withTempDir { dir =>
       val path = dir.toURI.getPath
-      val e = intercept[AnalysisException] {
-        sql(
-          s"""
-             |INSERT OVERWRITE LOCAL DIRECTORY '$path'
-             |STORED AS orc
-             |SELECT 1, 2
-           """.stripMargin)
-      }.getMessage
-      assert(e.contains(
-        "Hive support is required to INSERT OVERWRITE DIRECTORY with the Hive format"))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql(
+            s"""
+               |INSERT OVERWRITE LOCAL DIRECTORY '$path'
+               |STORED AS orc
+               |SELECT 1, 2
+             """.stripMargin)
+        },
+        errorClass = "NOT_SUPPORTED_COMMAND_WITHOUT_HIVE_SUPPORT",
+        parameters = Map("cmd" -> "INSERT OVERWRITE DIRECTORY with the Hive format")
+      )
     }
   }
 
@@ -518,16 +539,20 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
 
       val v1 =
         s"""
-           | INSERT OVERWRITE DIRECTORY '${path}'
+           | INSERT OVERWRITE DIRECTORY '$path'
            | USING JDBC
            | OPTIONS (a 1, b 0.1, c TRUE)
            | SELECT 1 as a, 'c' as b
          """.stripMargin
-      val e = intercept[SparkException] {
-        spark.sql(v1)
-      }.getMessage
-
-      assert(e.contains("Only Data Sources providing FileFormat are supported"))
+      checkError(
+        exception = intercept[SparkException] {
+          spark.sql(v1)
+        },
+        errorClass = "_LEGACY_ERROR_TEMP_2233",
+        parameters = Map(
+          "providingClass" -> ("class org.apache.spark.sql.execution.datasources." +
+            "jdbc.JdbcRelationProvider"))
+      )
     }
   }
 
@@ -629,29 +654,39 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       SQLConf.STORE_ASSIGNMENT_POLICY.key -> SQLConf.StoreAssignmentPolicy.STRICT.toString) {
       withTable("t") {
         sql("create table t(i int, d double) using parquet")
-        var msg = intercept[AnalysisException] {
-          sql("insert into t select 1L, 2")
-        }.getMessage
-        assert(msg.contains("Cannot safely cast 'i': bigint to int"))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t select 1L, 2")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_SAFELY_CAST",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`i`",
+            "srcType" -> "\"BIGINT\"",
+            "targetType" -> "\"INT\"")
+        )
 
-        msg = intercept[AnalysisException] {
-          sql("insert into t select 1, 2.0")
-        }.getMessage
-        assert(msg.contains("Cannot safely cast 'd': decimal(2,1) to double"))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t select 1, 2.0")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_SAFELY_CAST",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`d`",
+            "srcType" -> "\"DECIMAL(2,1)\"",
+            "targetType" -> "\"DOUBLE\"")
+        )
 
-        msg = intercept[AnalysisException] {
-          sql("insert into t select 1, 2.0D, 3")
-        }.getMessage
-        assert(msg.contains("`t` requires that the data to be inserted have the same number of " +
-          "columns as the target table: target table has 2 column(s)" +
-          " but the inserted data has 3 column(s)"))
-
-        msg = intercept[AnalysisException] {
-          sql("insert into t select 1")
-        }.getMessage
-        assert(msg.contains("`t` requires that the data to be inserted have the same number of " +
-          "columns as the target table: target table has 2 column(s)" +
-          " but the inserted data has 1 column(s)"))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t select 1, 2.0D, 3")
+          },
+          errorClass = "INSERT_COLUMN_ARITY_MISMATCH.TOO_MANY_DATA_COLUMNS",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "tableColumns" -> "`i`, `d`",
+            "dataColumns" -> "`1`, `2`.`0`, `3`"))
 
         // Insert into table successfully.
         sql("insert into t select 1, 2.0D")
@@ -666,21 +701,39 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       SQLConf.STORE_ASSIGNMENT_POLICY.key -> SQLConf.StoreAssignmentPolicy.ANSI.toString) {
       withTable("t") {
         sql("create table t(i int, d double) using parquet")
-        var msg = intercept[AnalysisException] {
-          sql("insert into t values('a', 'b')")
-        }.getMessage
-        assert(msg.contains("Cannot safely cast 'i': string to int") &&
-          msg.contains("Cannot safely cast 'd': string to double"))
-        msg = intercept[AnalysisException] {
-          sql("insert into t values(now(), now())")
-        }.getMessage
-        assert(msg.contains("Cannot safely cast 'i': timestamp to int") &&
-          msg.contains("Cannot safely cast 'd': timestamp to double"))
-        msg = intercept[AnalysisException] {
-          sql("insert into t values(true, false)")
-        }.getMessage
-        assert(msg.contains("Cannot safely cast 'i': boolean to int") &&
-          msg.contains("Cannot safely cast 'd': boolean to double"))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t values('a', 'b')")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_SAFELY_CAST",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`i`",
+            "srcType" -> "\"STRING\"",
+            "targetType" -> "\"INT\"")
+        )
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t values(now(), now())")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_SAFELY_CAST",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`i`",
+            "srcType" -> "\"TIMESTAMP\"",
+            "targetType" -> "\"INT\"")
+        )
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t values(true, false)")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_SAFELY_CAST",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`i`",
+            "srcType" -> "\"BOOLEAN\"",
+            "targetType" -> "\"INT\"")
+        )
       }
     }
   }
@@ -716,19 +769,32 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       SQLConf.STORE_ASSIGNMENT_POLICY.key -> SQLConf.StoreAssignmentPolicy.ANSI.toString) {
       withTable("t") {
         sql("create table t(b int) using parquet")
+
         val outOfRangeValue1 = (Int.MaxValue + 1L).toString
-        var msg = intercept[SparkException] {
+        val e1 = intercept[SparkException] {
           sql(s"insert into t values($outOfRangeValue1)")
-        }.getCause.getMessage
-        assert(msg.contains(
-          s"""The value ${outOfRangeValue1}L of the type "BIGINT" cannot be cast to "INT""""))
+        }
+        assert(e1.getErrorClass == "TASK_WRITE_FAILED")
+        checkError(
+          exception = e1.getCause.asInstanceOf[SparkArithmeticException],
+          errorClass = "CAST_OVERFLOW_IN_TABLE_INSERT",
+          parameters = Map(
+            "sourceType" -> "\"BIGINT\"",
+            "targetType" -> "\"INT\"",
+            "columnName" -> "`b`"))
 
         val outOfRangeValue2 = (Int.MinValue - 1L).toString
-        msg = intercept[SparkException] {
+        val e2 = intercept[SparkException] {
           sql(s"insert into t values($outOfRangeValue2)")
-        }.getCause.getMessage
-        assert(msg.contains(
-          s"""The value ${outOfRangeValue2}L of the type "BIGINT" cannot be cast to "INT""""))
+        }
+        assert(e2.getErrorClass == "TASK_WRITE_FAILED")
+        checkError(
+          exception = e2.getCause.asInstanceOf[SparkArithmeticException],
+          errorClass = "CAST_OVERFLOW_IN_TABLE_INSERT",
+          parameters = Map(
+            "sourceType" -> "\"BIGINT\"",
+            "targetType" -> "\"INT\"",
+            "columnName" -> "`b`"))
       }
     }
   }
@@ -738,19 +804,32 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       SQLConf.STORE_ASSIGNMENT_POLICY.key -> SQLConf.StoreAssignmentPolicy.ANSI.toString) {
       withTable("t") {
         sql("create table t(b long) using parquet")
+
         val outOfRangeValue1 = Math.nextUp(Long.MaxValue)
-        var msg = intercept[SparkException] {
+        val e1 = intercept[SparkException] {
           sql(s"insert into t values(${outOfRangeValue1}D)")
-        }.getCause.getMessage
-        assert(msg.contains(
-          s"""The value ${outOfRangeValue1}D of the type "DOUBLE" cannot be cast to "BIGINT""""))
+        }
+        assert(e1.getErrorClass == "TASK_WRITE_FAILED")
+        checkError(
+          exception = e1.getCause.asInstanceOf[SparkArithmeticException],
+          errorClass = "CAST_OVERFLOW_IN_TABLE_INSERT",
+          parameters = Map(
+            "sourceType" -> "\"DOUBLE\"",
+            "targetType" -> "\"BIGINT\"",
+            "columnName" -> "`b`"))
 
         val outOfRangeValue2 = Math.nextDown(Long.MinValue)
-        msg = intercept[SparkException] {
+        val e2 = intercept[SparkException] {
           sql(s"insert into t values(${outOfRangeValue2}D)")
-        }.getCause.getMessage
-        assert(msg.contains(
-          s"""The value ${outOfRangeValue2}D of the type "DOUBLE" cannot be cast to "BIGINT""""))
+        }
+        assert(e2.getErrorClass == "TASK_WRITE_FAILED")
+        checkError(
+          exception = e2.getCause.asInstanceOf[SparkArithmeticException],
+          errorClass = "CAST_OVERFLOW_IN_TABLE_INSERT",
+          parameters = Map(
+            "sourceType" -> "\"DOUBLE\"",
+            "targetType" -> "\"BIGINT\"",
+            "columnName" -> "`b`"))
       }
     }
   }
@@ -761,10 +840,17 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       withTable("t") {
         sql("create table t(b decimal(3,2)) using parquet")
         val outOfRangeValue = "123.45"
-        val msg = intercept[SparkException] {
-          sql(s"insert into t values(${outOfRangeValue})")
-        }.getCause.getMessage
-        assert(msg.contains("cannot be represented as Decimal(3, 2)"))
+        val ex = intercept[SparkException] {
+          sql(s"insert into t values($outOfRangeValue)")
+        }
+        assert(ex.getErrorClass == "TASK_WRITE_FAILED")
+        checkError(
+          exception = ex.getCause.asInstanceOf[SparkArithmeticException],
+          errorClass = "CAST_OVERFLOW_IN_TABLE_INSERT",
+          parameters = Map(
+            "sourceType" -> "\"DECIMAL(5,2)\"",
+            "targetType" -> "\"DECIMAL(3,2)\"",
+            "columnName" -> "`b`"))
       }
     }
   }
@@ -774,38 +860,62 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       SQLConf.STORE_ASSIGNMENT_POLICY.key -> SQLConf.StoreAssignmentPolicy.ANSI.toString) {
       withTable("t") {
         sql("CREATE TABLE t(i int, t timestamp) USING parquet")
-        val msg = intercept[AnalysisException] {
-          sql("INSERT INTO t VALUES (TIMESTAMP('2010-09-02 14:10:10'), 1)")
-        }.getMessage
-        assert(msg.contains("Cannot safely cast 'i': timestamp to int"))
-        assert(msg.contains("Cannot safely cast 't': int to timestamp"))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("INSERT INTO t VALUES (TIMESTAMP('2010-09-02 14:10:10'), 1)")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_SAFELY_CAST",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`i`",
+            "srcType" -> "\"TIMESTAMP\"",
+            "targetType" -> "\"INT\"")
+        )
       }
 
       withTable("t") {
         sql("CREATE TABLE t(i int, d date) USING parquet")
-        val msg = intercept[AnalysisException] {
-          sql("INSERT INTO t VALUES (date('2010-09-02'), 1)")
-        }.getMessage
-        assert(msg.contains("Cannot safely cast 'i': date to int"))
-        assert(msg.contains("Cannot safely cast 'd': int to date"))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("INSERT INTO t VALUES (date('2010-09-02'), 1)")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_SAFELY_CAST",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`i`",
+            "srcType" -> "\"DATE\"",
+            "targetType" -> "\"INT\"")
+        )
       }
 
       withTable("t") {
         sql("CREATE TABLE t(b boolean, t timestamp) USING parquet")
-        val msg = intercept[AnalysisException] {
-          sql("INSERT INTO t VALUES (TIMESTAMP('2010-09-02 14:10:10'), true)")
-        }.getMessage
-        assert(msg.contains("Cannot safely cast 'b': timestamp to boolean"))
-        assert(msg.contains("Cannot safely cast 't': boolean to timestamp"))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("INSERT INTO t VALUES (TIMESTAMP('2010-09-02 14:10:10'), true)")
+          },
+            errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_SAFELY_CAST",
+            parameters = Map(
+              "tableName" -> "`spark_catalog`.`default`.`t`",
+              "colName" -> "`b`",
+              "srcType" -> "\"TIMESTAMP\"",
+              "targetType" -> "\"BOOLEAN\"")
+        )
       }
 
       withTable("t") {
         sql("CREATE TABLE t(b boolean, d date) USING parquet")
-        val msg = intercept[AnalysisException] {
-          sql("INSERT INTO t VALUES (date('2010-09-02'), true)")
-        }.getMessage
-        assert(msg.contains("Cannot safely cast 'b': date to boolean"))
-        assert(msg.contains("Cannot safely cast 'd': boolean to date"))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("INSERT INTO t VALUES (date('2010-09-02'), true)")
+          },
+            errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_SAFELY_CAST",
+            parameters = Map(
+              "tableName" -> "`spark_catalog`.`default`.`t`",
+              "colName" -> "`b`",
+              "srcType" -> "\"DATE\"",
+              "targetType" -> "\"BOOLEAN\"")
+        )
       }
     }
   }
@@ -853,50 +963,62 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       spark.sessionState.catalog.createTable(newTable, false)
 
       sql("INSERT INTO TABLE test_table SELECT 1, 'a'")
-      val msg = intercept[AnalysisException] {
+      val msg = intercept[SparkException] {
         sql("INSERT INTO TABLE test_table SELECT 2, null")
-      }.getMessage
-      assert(msg.contains("Cannot write nullable values to non-null column 's'"))
+      }.getCause.getMessage
+      assert(msg.contains("Null value appeared in non-nullable field"))
     }
   }
 
   test("Allow user to insert specified columns into insertable view") {
-    withSQLConf(SQLConf.USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES.key -> "true") {
-      sql("INSERT OVERWRITE TABLE jsonTable SELECT a FROM jt")
-      checkAnswer(
-        sql("SELECT a, b FROM jsonTable"),
-        (1 to 10).map(i => Row(i, null))
-      )
+    sql("INSERT OVERWRITE TABLE jsonTable SELECT a, DEFAULT FROM jt")
+    checkAnswer(
+      sql("SELECT a, b FROM jsonTable"),
+      (1 to 10).map(i => Row(i, null))
+    )
 
-      sql("INSERT OVERWRITE TABLE jsonTable(a) SELECT a FROM jt")
-      checkAnswer(
-        sql("SELECT a, b FROM jsonTable"),
-        (1 to 10).map(i => Row(i, null))
-      )
+    checkError(
+      exception = intercept[AnalysisException] {
+        sql("INSERT OVERWRITE TABLE jsonTable SELECT a FROM jt")
+      },
+      errorClass = "INSERT_COLUMN_ARITY_MISMATCH.NOT_ENOUGH_DATA_COLUMNS",
+      parameters = Map(
+        "tableName" -> "`unknown`",
+        "tableColumns" -> "`a`, `b`",
+        "dataColumns" -> "`a`"))
 
-      sql("INSERT OVERWRITE TABLE jsonTable(b) SELECT b FROM jt")
-      checkAnswer(
-        sql("SELECT a, b FROM jsonTable"),
-        (1 to 10).map(i => Row(null, s"str$i"))
-      )
+    sql("INSERT OVERWRITE TABLE jsonTable(a) SELECT a FROM jt")
+    checkAnswer(
+      sql("SELECT a, b FROM jsonTable"),
+      (1 to 10).map(i => Row(i, null))
+    )
+
+    sql("INSERT OVERWRITE TABLE jsonTable(b) SELECT b FROM jt")
+    checkAnswer(
+      sql("SELECT a, b FROM jsonTable"),
+      (1 to 10).map(i => Row(null, s"str$i"))
+    )
+
+    withSQLConf(SQLConf.USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES.key -> "false") {
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("INSERT OVERWRITE TABLE jsonTable SELECT a FROM jt")
+        },
+        errorClass = "INSERT_COLUMN_ARITY_MISMATCH.NOT_ENOUGH_DATA_COLUMNS",
+        parameters = Map(
+          "tableName" -> "`unknown`",
+          "tableColumns" -> "`a`, `b`",
+          "dataColumns" -> "`a`"))
     }
-
-    val message = intercept[AnalysisException] {
-      sql("INSERT OVERWRITE TABLE jsonTable(a) SELECT a FROM jt")
-    }.getMessage
-    assert(message.contains("target table has 2 column(s) but the inserted data has 1 column(s)"))
   }
 
   test("SPARK-38336 INSERT INTO statements with tables with default columns: positive tests") {
-    // When the USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES configuration is enabled, and no
-    // explicit DEFAULT value is available when the INSERT INTO statement provides fewer
-    // values than expected, NULL values are appended in their place.
-    withSQLConf(SQLConf.USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES.key -> "true") {
-      withTable("t") {
-        sql("create table t(i boolean, s bigint) using parquet")
-        sql("insert into t values(true)")
-        checkAnswer(spark.table("t"), Row(true, null))
-      }
+    // When the INSERT INTO statement provides fewer values than expected, NULL values are appended
+    // in their place.
+    withTable("t") {
+      sql("create table t(i boolean, s bigint) using parquet")
+      sql("insert into t(i) values(true)")
+      checkAnswer(spark.table("t"), Row(true, null))
     }
     // The default value for the DEFAULT keyword is the NULL literal.
     withTable("t") {
@@ -913,14 +1035,19 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     // The default value parses correctly and the provided value type is different but coercible.
     withTable("t") {
       sql("create table t(i boolean, s bigint default 42) using parquet")
-      sql("insert into t values(false)")
+      sql("insert into t(i) values(false)")
       checkAnswer(spark.table("t"), Row(false, 42L))
     }
     // There are two trailing default values referenced implicitly by the INSERT INTO statement.
     withTable("t") {
       sql("create table t(i int, s bigint default 42, x bigint default 43) using parquet")
-      sql("insert into t values(1)")
+      sql("insert into t(i) values(1)")
       checkAnswer(sql("select s + x from t where i = 1"), Seq(85L).map(i => Row(i)))
+    }
+    withTable("t") {
+      sql("create table t(i int, s bigint default 42, x bigint) using parquet")
+      sql("insert into t(i) values(1)")
+      checkAnswer(spark.table("t"), Row(1, 42L, null))
     }
     // The table has a partitioning column and a default value is injected.
     withTable("t") {
@@ -931,7 +1058,7 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     // The table has a partitioning column and a default value is added per an explicit reference.
     withTable("t") {
       sql("create table t(i boolean, s bigint default 42) using parquet partitioned by (i)")
-      sql("insert into t partition(i='true') values(default)")
+      sql("insert into t partition(i='true') (s) values(default)")
       checkAnswer(spark.table("t"), Row(42L, true))
     }
     // The default value parses correctly as a constant but non-literal expression.
@@ -944,7 +1071,7 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     // to the INSERT INTO statement.
     withTable("t") {
       sql("create table t(i boolean default false, s bigint default 42) using parquet")
-      sql("insert into t values(false, default), (default, 42)")
+      sql("insert into t(i, s) values(false, default), (default, 42)")
       checkAnswer(spark.table("t"), Seq(Row(false, 42L), Row(false, 42L)))
     }
     // There is an explicit default value provided in the INSERT INTO statement in the VALUES,
@@ -996,20 +1123,36 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     // There are three column types exercising various combinations of implicit and explicit
     // default column value references in the 'insert into' statements. Note these tests depend on
     // enabling the configuration to use NULLs for missing DEFAULT column values.
-    withSQLConf(SQLConf.USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES.key -> "true") {
+    for (useDataFrames <- Seq(false, true)) {
       withTable("t1", "t2") {
         sql("create table t1(j int, s bigint default 42, x bigint default 43) using parquet")
-        sql("insert into t1 values(1)")
-        sql("insert into t1 values(2, default)")
-        sql("insert into t1 values(3, default, default)")
-        sql("insert into t1 values(4, 44)")
-        sql("insert into t1 values(5, 44, 45)")
+        if (useDataFrames) {
+          Seq((1, 42, 43)).toDF().write.insertInto("t1")
+          Seq((2, 42, 43)).toDF().write.insertInto("t1")
+          Seq((3, 42, 43)).toDF().write.insertInto("t1")
+          Seq((4, 44, 43)).toDF().write.insertInto("t1")
+          Seq((5, 44, 43)).toDF().write.insertInto("t1")
+        } else {
+          sql("insert into t1(j) values(1)")
+          sql("insert into t1(j, s) values(2, default)")
+          sql("insert into t1(j, s, x) values(3, default, default)")
+          sql("insert into t1(j, s) values(4, 44)")
+          sql("insert into t1(j, s, x) values(5, 44, 45)")
+        }
         sql("create table t2(j int, s bigint default 42, x bigint default 43) using parquet")
-        sql("insert into t2 select j from t1 where j = 1")
-        sql("insert into t2 select j, default from t1 where j = 2")
-        sql("insert into t2 select j, default, default from t1 where j = 3")
-        sql("insert into t2 select j, s from t1 where j = 4")
-        sql("insert into t2 select j, s, default from t1 where j = 5")
+        if (useDataFrames) {
+          spark.table("t1").where("j = 1").write.insertInto("t2")
+          spark.table("t1").where("j = 2").write.insertInto("t2")
+          spark.table("t1").where("j = 3").write.insertInto("t2")
+          spark.table("t1").where("j = 4").write.insertInto("t2")
+          spark.table("t1").where("j = 5").write.insertInto("t2")
+        } else {
+          sql("insert into t2(j) select j from t1 where j = 1")
+          sql("insert into t2(j, s) select j, default from t1 where j = 2")
+          sql("insert into t2(j, s, x) select j, default, default from t1 where j = 3")
+          sql("insert into t2(j, s) select j, s from t1 where j = 4")
+          sql("insert into t2(j, s, x) select j, s, default from t1 where j = 5")
+        }
         checkAnswer(
           spark.table("t2"),
           Row(1, 42L, 43L) ::
@@ -1021,113 +1164,206 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     }
   }
 
-  test("SPARK-38336 INSERT INTO statements with tables with default columns: negative tests") {
-    object Errors {
-      val COMMON_SUBSTRING = " has a DEFAULT value"
-      val COLUMN_DEFAULT_NOT_FOUND = "`default` cannot be resolved."
-      val BAD_SUBQUERY = "cannot evaluate expression scalarsubquery() in inline table definition"
-    }
-    // The default value fails to analyze.
+  test("SPARK-47164: Make Default Value From Wider Type Narrow Literal pass v2") {
     withTable("t") {
-      assert(intercept[AnalysisException] {
-        sql("create table t(i boolean, s bigint default badvalue) using parquet")
-      }.getMessage.contains(Errors.COMMON_SUBSTRING))
+      val v2Source = classOf[FakeV2ProviderWithCustomSchema].getName
+      sql("CREATE TABLE t (" +
+        "key int, " +
+        s"d timestamp DEFAULT '2018-11-17 13:33:33') USING $v2Source")
+    }
+  }
+
+  test("SPARK-38336 INSERT INTO statements with tables with default columns: negative tests") {
+    // The default value references columns.
+    withTable("t") {
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("create table t(i boolean, s bigint default badvalue) using parquet")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.NOT_CONSTANT",
+        parameters = Map(
+          "statement" -> "CREATE TABLE",
+          "colName" -> "`s`",
+          "defaultValue" -> "badvalue"))
+    }
+    try {
+      // The default value references session variables.
+      sql("DECLARE test_var INT")
+      withTable("t") {
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("create table t(i boolean, s int default test_var) using parquet")
+          },
+          // V1 command still use the fake Analyzer which can't resolve session variables and we
+          // can only report UNRESOLVED_EXPRESSION error.
+          errorClass = "INVALID_DEFAULT_VALUE.UNRESOLVED_EXPRESSION",
+          parameters = Map(
+            "statement" -> "CREATE TABLE",
+            "colName" -> "`s`",
+            "defaultValue" -> "test_var")
+        )
+        val v2Source = classOf[FakeV2Provider].getName
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql(s"create table t(i int, j int default test_var) using $v2Source")
+          },
+          // V2 command uses the actual analyzer and can resolve session variables. We can report
+          // a more accurate NOT_CONSTANT error.
+          errorClass = "INVALID_DEFAULT_VALUE.NOT_CONSTANT",
+          parameters = Map(
+            "statement" -> "CREATE TABLE",
+            "colName" -> "`j`",
+            "defaultValue" -> "test_var")
+        )
+      }
+    } finally {
+      sql("DROP TEMPORARY VARIABLE test_var")
     }
     // The default value analyzes to a table not in the catalog.
     withTable("t") {
-      assert(intercept[AnalysisException] {
-        sql("create table t(i boolean, s bigint default (select min(x) from badtable)) " +
-          "using parquet")
-      }.getMessage.contains(Errors.COMMON_SUBSTRING))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("create table t(i boolean, s bigint default (select min(x) from badtable)) " +
+            "using parquet")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+        parameters = Map(
+          "statement" -> "CREATE TABLE",
+          "colName" -> "`s`",
+          "defaultValue" -> "(select min(x) from badtable)"))
     }
     // The default value parses but refers to a table from the catalog.
     withTable("t", "other") {
       sql("create table other(x string) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("create table t(i boolean, s bigint default (select min(x) from other)) using parquet")
-      }.getMessage.contains(Errors.COMMON_SUBSTRING))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("create table t(i boolean, s bigint default (select min(x) from other)) " +
+            "using parquet")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+        parameters = Map(
+          "statement" -> "CREATE TABLE",
+          "colName" -> "`s`",
+          "defaultValue" -> "(select min(x) from other)"))
     }
     // The default value has an explicit alias. It fails to evaluate when inlined into the VALUES
     // list at the INSERT INTO time.
     withTable("t") {
-      sql("create table t(i boolean default (select false as alias), s bigint) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("insert into t values (default, default)")
-      }.getMessage.contains(Errors.BAD_SUBQUERY))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("create table t(i boolean default (select false as alias), s bigint) using parquet")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+        parameters = Map(
+          "statement" -> "CREATE TABLE",
+          "colName" -> "`i`",
+          "defaultValue" -> "(select false as alias)"))
     }
     // Explicit default values may not participate in complex expressions in the VALUES list.
     withTable("t") {
       sql("create table t(i boolean, s bigint default 42) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("insert into t values(false, default + 1)")
-      }.getMessage.contains(
-        QueryCompilationErrors.defaultReferencesNotAllowedInComplexExpressionsInInsertValuesList()
-          .getMessage))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("insert into t values(false, default + 1)")
+        },
+        errorClass = "DEFAULT_PLACEMENT_INVALID",
+        parameters = Map.empty
+      )
     }
     // Explicit default values may not participate in complex expressions in the SELECT query.
     withTable("t") {
       sql("create table t(i boolean, s bigint default 42) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("insert into t select false, default + 1")
-      }.getMessage.contains(
-        QueryCompilationErrors.defaultReferencesNotAllowedInComplexExpressionsInInsertValuesList()
-          .getMessage))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("insert into t select false, default + 1")
+        },
+        errorClass = "DEFAULT_PLACEMENT_INVALID",
+        parameters = Map.empty
+      )
     }
     // Explicit default values have a reasonable error path if the table is not found.
     withTable("t") {
-      assert(intercept[AnalysisException] {
-        sql("insert into t values(false, default)")
-      }.getMessage.contains(Errors.COLUMN_DEFAULT_NOT_FOUND))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("insert into t values(false, default)")
+        },
+        errorClass = "TABLE_OR_VIEW_NOT_FOUND",
+        parameters = Map("relationName" -> "`t`"),
+        context = ExpectedContext("t", 12, 12)
+      )
     }
     // The default value parses but the type is not coercible.
     withTable("t") {
-      assert(intercept[AnalysisException] {
-        sql("create table t(i boolean, s bigint default false) using parquet")
-      }.getMessage.contains(Errors.COMMON_SUBSTRING))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("create table t(i boolean, s bigint default false) using parquet")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.DATA_TYPE",
+        parameters = Map(
+          "statement" -> "CREATE TABLE",
+          "colName" -> "`s`",
+          "expectedType" -> "\"BIGINT\"",
+          "defaultValue" -> "false",
+          "actualType" -> "\"BOOLEAN\""))
     }
     // The number of columns in the INSERT INTO statement is greater than the number of columns in
     // the table.
     withTable("t") {
       sql("create table num_data(id int, val decimal(38,10)) using parquet")
       sql("create table t(id1 int, int2 int, result decimal(38,10)) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("insert into t select t1.id, t2.id, t1.val, t2.val, t1.val * t2.val " +
-          "from num_data t1, num_data t2")
-      }.getMessage.contains(
-        "requires that the data to be inserted have the same number of columns as the target"))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("insert into t select t1.id, t2.id, t1.val, t2.val, t1.val * t2.val " +
+            "from num_data t1, num_data t2")
+        },
+        errorClass = "INSERT_COLUMN_ARITY_MISMATCH.TOO_MANY_DATA_COLUMNS",
+        parameters = Map(
+          "tableName" -> "`spark_catalog`.`default`.`t`",
+          "tableColumns" -> "`id1`, `int2`, `result`",
+          "dataColumns" -> "`id`, `id`, `val`, `val`, `(val * val)`"))
     }
     // The default value is disabled per configuration.
     withTable("t") {
       withSQLConf(SQLConf.ENABLE_DEFAULT_COLUMNS.key -> "false") {
-        assert(intercept[AnalysisException] {
-          sql("create table t(i boolean, s bigint default 42L) using parquet")
-        }.getMessage.contains("Support for DEFAULT column values is not allowed"))
+        checkError(
+          exception = intercept[ParseException] {
+            sql("create table t(i boolean, s bigint default 42L) using parquet")
+          },
+          errorClass = "UNSUPPORTED_DEFAULT_VALUE.WITH_SUGGESTION",
+          parameters = Map.empty,
+          context = ExpectedContext("s bigint default 42L", 26, 45)
+        )
       }
-    }
-    // There is one trailing default value referenced implicitly by the INSERT INTO statement.
-    withTable("t") {
-      sql("create table t(i int, s bigint default 42, x bigint) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("insert into t values(1)")
-      }.getMessage.contains("expected 3 columns but found"))
     }
     // The table has a partitioning column with a default value; this is not allowed.
     withTable("t") {
       sql("create table t(i boolean default true, s bigint, q int default 42) " +
         "using parquet partitioned by (i)")
-      assert(intercept[ParseException] {
-        sql("insert into t partition(i=default) values(5, default)")
-      }.getMessage.contains(
-        "References to DEFAULT column values are not allowed within the PARTITION clause"))
+      checkError(
+        exception = intercept[ParseException] {
+          sql("insert into t partition(i=default) values(5, default)")
+        },
+        errorClass = "REF_DEFAULT_VALUE_IS_NOT_ALLOWED_IN_PARTITION",
+        parameters = Map.empty,
+        context = ExpectedContext(
+          fragment = "partition(i=default)",
+          start = 14,
+          stop = 33))
     }
     // The configuration option to append missing NULL values to the end of the INSERT INTO
     // statement is not enabled.
     withSQLConf(SQLConf.USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES.key -> "false") {
       withTable("t") {
         sql("create table t(i boolean, s bigint) using parquet")
-        assert(intercept[AnalysisException] {
-          sql("insert into t values(true)")
-        }.getMessage.contains("target table has 2 column(s) but the inserted data has 1 column(s)"))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t values(true)")
+          },
+          errorClass = "INSERT_COLUMN_ARITY_MISMATCH.NOT_ENOUGH_DATA_COLUMNS",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "tableColumns" -> "`i`, `s`",
+            "dataColumns" -> "`col1`"))
       }
     }
   }
@@ -1160,74 +1396,48 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
             Row(4, 43, false),
             Row(4, 42, false)))
     }
-    // When the CASE_SENSITIVE configuration is disabled, then using different cases for the
-    // required and provided column names is successful.
-    withSQLConf(SQLConf.CASE_SENSITIVE.key -> "false") {
-      withTable("t") {
-        sql("create table t(i boolean, s bigint default 42, q int default 43) using parquet")
-        sql("insert into t (I, Q) select true from (select 1)")
-        checkAnswer(spark.table("t"), Row(true, 42L, 43))
-      }
-    }
-    // When the USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES configuration is enabled, and no
-    // explicit DEFAULT value is available when the INSERT INTO statement provides fewer
+    // If no explicit DEFAULT value is available when the INSERT INTO statement provides fewer
     // values than expected, NULL values are appended in their place.
-    withSQLConf(SQLConf.USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES.key -> "true") {
-      withTable("t") {
-        sql("create table t(i boolean, s bigint) using parquet")
-        sql("insert into t (i) values (true)")
-        checkAnswer(spark.table("t"), Row(true, null))
-      }
-      withTable("t") {
-        sql("create table t(i boolean default true, s bigint) using parquet")
-        sql("insert into t (i) values (default)")
-        checkAnswer(spark.table("t"), Row(true, null))
-      }
-      withTable("t") {
-        sql("create table t(i boolean, s bigint default 42) using parquet")
-        sql("insert into t (s) values (default)")
-        checkAnswer(spark.table("t"), Row(null, 42L))
-      }
-      withTable("t") {
-        sql("create table t(i boolean, s bigint, q int) using parquet partitioned by (i)")
-        sql("insert into t partition(i='true') (s) values(5)")
-        sql("insert into t partition(i='false') (q) select 43")
-        sql("insert into t partition(i='false') (q) select default")
-        checkAnswer(spark.table("t"),
-          Seq(Row(5, null, true),
-            Row(null, 43, false),
-            Row(null, null, false)))
-      }
+    withTable("t") {
+      sql("create table t(i boolean, s bigint) using parquet")
+      sql("insert into t (i) values (true)")
+      checkAnswer(spark.table("t"), Row(true, null))
+    }
+    withTable("t") {
+      sql("create table t(i boolean default true, s bigint) using parquet")
+      sql("insert into t (i) values (default)")
+      checkAnswer(spark.table("t"), Row(true, null))
+    }
+    withTable("t") {
+      sql("create table t(i boolean, s bigint default 42) using parquet")
+      sql("insert into t (s) values (default)")
+      checkAnswer(spark.table("t"), Row(null, 42L))
+    }
+    withTable("t") {
+      sql("create table t(i boolean, s bigint, q int) using parquet partitioned by (i)")
+      sql("insert into t partition(i='true') (s) values(5)")
+      sql("insert into t partition(i='false') (q) select 43")
+      sql("insert into t partition(i='false') (q) select default")
+      checkAnswer(spark.table("t"),
+        Seq(Row(5, null, true),
+          Row(null, 43, false),
+          Row(null, null, false)))
     }
   }
 
   test("SPARK- 38795 INSERT INTO with user specified columns and defaults: negative tests") {
-    val addOneColButExpectedTwo = "target table has 2 column(s) but the inserted data has 1 col"
-    val addTwoColButExpectedThree = "target table has 3 column(s) but the inserted data has 2 col"
     // The missing columns in these INSERT INTO commands do not have explicit default values.
     withTable("t") {
-      sql("create table t(i boolean, s bigint) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("insert into t (i) values (true)")
-      }.getMessage.contains(addOneColButExpectedTwo))
-    }
-    withTable("t") {
-      sql("create table t(i boolean default true, s bigint) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("insert into t (i) values (default)")
-      }.getMessage.contains(addOneColButExpectedTwo))
-    }
-    withTable("t") {
-      sql("create table t(i boolean, s bigint default 42) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("insert into t (s) values (default)")
-      }.getMessage.contains(addOneColButExpectedTwo))
-    }
-    withTable("t") {
       sql("create table t(i boolean, s bigint, q int default 43) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("insert into t (i, q) select true from (select 1)")
-      }.getMessage.contains(addTwoColButExpectedThree))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("insert into t (i, q) select true from (select 1)")
+        },
+        errorClass = "INSERT_COLUMN_ARITY_MISMATCH.NOT_ENOUGH_DATA_COLUMNS",
+        parameters = Map(
+          "tableName" -> "`spark_catalog`.`default`.`t`",
+          "tableColumns" -> "`i`, `q`",
+          "dataColumns" -> "`true`"))
     }
     // When the USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES configuration is disabled, and no
     // explicit DEFAULT value is available when the INSERT INTO statement provides fewer
@@ -1235,39 +1445,69 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     withSQLConf(SQLConf.USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES.key -> "false") {
       withTable("t") {
         sql("create table t(i boolean, s bigint) using parquet")
-        assert(intercept[AnalysisException] {
-          sql("insert into t (i) values (true)")
-        }.getMessage.contains(addOneColButExpectedTwo))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t (i) values (true)")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`s`"))
       }
       withTable("t") {
         sql("create table t(i boolean default true, s bigint) using parquet")
-        assert(intercept[AnalysisException] {
-          sql("insert into t (i) values (default)")
-        }.getMessage.contains(addOneColButExpectedTwo))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t (i) values (default)")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`s`"))
       }
       withTable("t") {
         sql("create table t(i boolean, s bigint default 42) using parquet")
-        assert(intercept[AnalysisException] {
-          sql("insert into t (s) values (default)")
-        }.getMessage.contains(addOneColButExpectedTwo))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t (s) values (default)")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`i`"))
       }
       withTable("t") {
         sql("create table t(i boolean, s bigint, q int) using parquet partitioned by (i)")
-        assert(intercept[AnalysisException] {
-          sql("insert into t partition(i='true') (s) values(5)")
-        }.getMessage.contains(addTwoColButExpectedThree))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t partition(i='true') (s) values(5)")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`q`"))
       }
       withTable("t") {
         sql("create table t(i boolean, s bigint, q int) using parquet partitioned by (i)")
-        assert(intercept[AnalysisException] {
-          sql("insert into t partition(i='false') (q) select 43")
-        }.getMessage.contains(addTwoColButExpectedThree))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t partition(i='false') (q) select 43")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`s`"))
       }
       withTable("t") {
         sql("create table t(i boolean, s bigint, q int) using parquet partitioned by (i)")
-        assert(intercept[AnalysisException] {
-          sql("insert into t partition(i='false') (q) select default")
-        }.getMessage.contains(addTwoColButExpectedThree))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("insert into t partition(i='false') (q) select default")
+          },
+          errorClass = "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA",
+          parameters = Map(
+            "tableName" -> "`spark_catalog`.`default`.`t`",
+            "colName" -> "`s`"))
       }
     }
     // When the CASE_SENSITIVE configuration is enabled, then using different cases for the required
@@ -1275,11 +1515,14 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     withSQLConf(SQLConf.CASE_SENSITIVE.key -> "true") {
       withTable("t") {
         sql("create table t(i boolean default true, s bigint default 42) using parquet")
-        assert(intercept[AnalysisException] {
-          sql("insert into t (I) select true from (select 1)")
-        }.getMessage.contains(
-          "[UNRESOLVED_COLUMN] A column or function parameter with name `I` cannot be resolved. " +
-            "Did you mean one of the following? [`i`, `s`]"))
+        checkError(
+          exception =
+            intercept[AnalysisException](sql("insert into t (I) select true from (select 1)")),
+          errorClass = "UNRESOLVED_COLUMN.WITH_SUGGESTION",
+          sqlState = None,
+          parameters = Map("objectName" -> "`I`", "proposal" -> "`i`, `s`"),
+          context = ExpectedContext(
+            fragment = "insert into t (I)", start = 0, stop = 16))
       }
     }
   }
@@ -1299,15 +1542,22 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       sql(createTableIntCol)
       sql("alter table t add column s bigint default 42")
       sql("alter table t add column x bigint default 43")
-      sql("insert into t values(1)")
+      sql("insert into t(i) values(1)")
       checkAnswer(spark.table("t"), Row(1, 42, 43))
     }
     // There are two trailing default values referenced implicitly by the INSERT INTO statement.
     withTable("t") {
       sql(createTableIntCol)
       sql("alter table t add columns s bigint default 42, x bigint default 43")
-      sql("insert into t values(1)")
+      sql("insert into t(i) values(1)")
       checkAnswer(spark.table("t"), Row(1, 42, 43))
+    }
+    withTable("t") {
+      sql(createTableIntCol)
+      sql("alter table t add column s bigint default 42")
+      sql("alter table t add column x bigint")
+      sql("insert into t(i) values(1)")
+      checkAnswer(spark.table("t"), Row(1, 42, null))
     }
     // The table has a partitioning column and a default value is injected.
     withTable("t") {
@@ -1320,8 +1570,8 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     withTable("t") {
       sql(createTableBooleanCol)
       sql("alter table t add column s bigint default 41 + 1")
-      sql("insert into t values(false, default)")
-      checkAnswer(spark.table("t"), Row(false, 42))
+      sql("insert into t(i) values(default)")
+      checkAnswer(spark.table("t"), Row(null, 42))
     }
     // Explicit defaults may appear in different positions within the inline table provided as input
     // to the INSERT INTO statement.
@@ -1366,84 +1616,104 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
     // There are three column types exercising various combinations of implicit and explicit
     // default column value references in the 'insert into' statements. Note these tests depend on
     // enabling the configuration to use NULLs for missing DEFAULT column values.
-    withSQLConf(SQLConf.USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES.key -> "true") {
-      withTable("t1", "t2") {
-        sql("create table t1(j int) using parquet")
-        sql("alter table t1 add column s bigint default 42")
-        sql("alter table t1 add column x bigint default 43")
-        sql("insert into t1 values(1)")
-        sql("insert into t1 values(2, default)")
-        sql("insert into t1 values(3, default, default)")
-        sql("insert into t1 values(4, 44)")
-        sql("insert into t1 values(5, 44, 45)")
-        sql("create table t2(j int) using parquet")
-        sql("alter table t2 add columns s bigint default 42, x bigint default 43")
-        sql("insert into t2 select j from t1 where j = 1")
-        sql("insert into t2 select j, default from t1 where j = 2")
-        sql("insert into t2 select j, default, default from t1 where j = 3")
-        sql("insert into t2 select j, s from t1 where j = 4")
-        sql("insert into t2 select j, s, default from t1 where j = 5")
-        checkAnswer(
-          spark.table("t2"),
-          Row(1, 42L, 43L) ::
-          Row(2, 42L, 43L) ::
-          Row(3, 42L, 43L) ::
-          Row(4, 44L, 43L) ::
-          Row(5, 44L, 43L) :: Nil)
-      }
+    withTable("t1", "t2") {
+      sql("create table t1(j int) using parquet")
+      sql("alter table t1 add column s bigint default 42")
+      sql("alter table t1 add column x bigint default 43")
+      sql("insert into t1(j) values(1)")
+      sql("insert into t1(j, s) values(2, default)")
+      sql("insert into t1(j, s, x) values(3, default, default)")
+      sql("insert into t1(j, s) values(4, 44)")
+      sql("insert into t1(j, s, x) values(5, 44, 45)")
+      sql("create table t2(j int) using parquet")
+      sql("alter table t2 add columns s bigint default 42, x bigint default 43")
+      sql("insert into t2(j) select j from t1 where j = 1")
+      sql("insert into t2(j, s) select j, default from t1 where j = 2")
+      sql("insert into t2(j, s, x) select j, default, default from t1 where j = 3")
+      sql("insert into t2(j, s) select j, s from t1 where j = 4")
+      sql("insert into t2(j, s, x) select j, s, default from t1 where j = 5")
+      checkAnswer(
+        spark.table("t2"),
+        Row(1, 42L, 43L) ::
+        Row(2, 42L, 43L) ::
+        Row(3, 42L, 43L) ::
+        Row(4, 44L, 43L) ::
+        Row(5, 44L, 43L) :: Nil)
     }
   }
 
   test("SPARK-38811 INSERT INTO on columns added with ALTER TABLE ADD COLUMNS: Negative tests") {
-    object Errors {
-      val COMMON_SUBSTRING = " has a DEFAULT value"
-    }
     // The default value fails to analyze.
     withTable("t") {
       sql("create table t(i boolean) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("alter table t add column s bigint default badvalue")
-      }.getMessage.contains(Errors.COMMON_SUBSTRING))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("alter table t add column s bigint default badvalue")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.UNRESOLVED_EXPRESSION",
+        parameters = Map(
+          "statement" -> "ALTER TABLE ADD COLUMNS",
+          "colName" -> "`s`",
+          "defaultValue" -> "badvalue"))
     }
     // The default value analyzes to a table not in the catalog.
     withTable("t") {
       sql("create table t(i boolean) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("alter table t add column s bigint default (select min(x) from badtable)")
-      }.getMessage.contains(Errors.COMMON_SUBSTRING))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("alter table t add column s bigint default (select min(x) from badtable)")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+        parameters = Map(
+          "statement" -> "ALTER TABLE ADD COLUMNS",
+          "colName" -> "`s`",
+          "defaultValue" -> "(select min(x) from badtable)"))
     }
     // The default value parses but refers to a table from the catalog.
     withTable("t", "other") {
       sql("create table other(x string) using parquet")
       sql("create table t(i boolean) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("alter table t add column s bigint default (select min(x) from other)")
-      }.getMessage.contains(Errors.COMMON_SUBSTRING))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("alter table t add column s bigint default (select min(x) from other)")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+        parameters = Map(
+          "statement" -> "ALTER TABLE ADD COLUMNS",
+          "colName" -> "`s`",
+          "defaultValue" -> "(select min(x) from other)"))
     }
     // The default value parses but the type is not coercible.
     withTable("t") {
       sql("create table t(i boolean) using parquet")
-      assert(intercept[AnalysisException] {
-        sql("alter table t add column s bigint default false")
-      }.getMessage.contains("provided a value of incompatible type"))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("alter table t add column s bigint default false")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.DATA_TYPE",
+        parameters = Map(
+          "statement" -> "ALTER TABLE ADD COLUMNS",
+          "colName" -> "`s`",
+          "expectedType" -> "\"BIGINT\"",
+          "defaultValue" -> "false",
+          "actualType" -> "\"BOOLEAN\""))
     }
     // The default value is disabled per configuration.
     withTable("t") {
       withSQLConf(SQLConf.ENABLE_DEFAULT_COLUMNS.key -> "false") {
         sql("create table t(i boolean) using parquet")
-        assert(intercept[AnalysisException] {
-          sql("alter table t add column s bigint default 42L")
-        }.getMessage.contains("Support for DEFAULT column values is not allowed"))
+        checkError(
+          exception = intercept[ParseException] {
+            sql("alter table t add column s bigint default 42L")
+          },
+          errorClass = "UNSUPPORTED_DEFAULT_VALUE.WITH_SUGGESTION",
+          parameters = Map.empty,
+          context = ExpectedContext(
+            fragment = "s bigint default 42L",
+            start = 25,
+            stop = 44)
+        )
       }
-    }
-    // There is one trailing default value referenced implicitly by the INSERT INTO statement.
-    withTable("t") {
-      sql("create table t(i int) using parquet")
-      sql("alter table t add column s bigint default 42")
-      sql("alter table t add column x bigint")
-      assert(intercept[AnalysisException] {
-        sql("insert into t values(1)")
-      }.getMessage.contains("expected 3 columns but found"))
     }
   }
 
@@ -1472,57 +1742,91 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
   }
 
   test("SPARK-38838 INSERT INTO with defaults set by ALTER TABLE ALTER COLUMN: negative tests") {
-    object Errors {
-      val COMMON_SUBSTRING = " has a DEFAULT value"
-      val BAD_SUBQUERY =
-        "cannot evaluate expression CAST(scalarsubquery() AS BIGINT) in inline table definition"
-    }
     val createTable = "create table t(i boolean, s bigint) using parquet"
-    val insertDefaults = "insert into t values (default, default)"
     withTable("t") {
       sql(createTable)
       // The default value fails to analyze.
-      assert(intercept[AnalysisException] {
-        sql("alter table t alter column s set default badvalue")
-      }.getMessage.contains(Errors.COMMON_SUBSTRING))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("alter table t alter column s set default badvalue")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.UNRESOLVED_EXPRESSION",
+        parameters = Map(
+          "statement" -> "ALTER TABLE ALTER COLUMN",
+          "colName" -> "`s`",
+          "defaultValue" -> "badvalue"))
       // The default value analyzes to a table not in the catalog.
-      assert(intercept[AnalysisException] {
-        sql("alter table t alter column s set default (select min(x) from badtable)")
-      }.getMessage.contains(Errors.COMMON_SUBSTRING))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("alter table t alter column s set default (select min(x) from badtable)")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+        parameters = Map(
+          "statement" -> "ALTER TABLE ALTER COLUMN",
+          "colName" -> "`s`",
+          "defaultValue" -> "(select min(x) from badtable)"))
       // The default value has an explicit alias. It fails to evaluate when inlined into the VALUES
       // list at the INSERT INTO time.
-      sql("alter table t alter column s set default (select 42 as alias)")
-      assert(intercept[AnalysisException] {
-        sql(insertDefaults)
-      }.getMessage.contains(Errors.BAD_SUBQUERY))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("alter table t alter column s set default (select 42 as alias)")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+        parameters = Map(
+          "statement" -> "ALTER TABLE ALTER COLUMN",
+          "colName" -> "`s`",
+          "defaultValue" -> "(select 42 as alias)"))
       // The default value parses but the type is not coercible.
-      assert(intercept[AnalysisException] {
-        sql("alter table t alter column s set default false")
-      }.getMessage.contains("provided a value of incompatible type"))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("alter table t alter column s set default false")
+        },
+        errorClass = "INVALID_DEFAULT_VALUE.DATA_TYPE",
+        parameters = Map(
+          "statement" -> "ALTER TABLE ALTER COLUMN",
+          "colName" -> "`s`",
+          "expectedType" -> "\"BIGINT\"",
+          "defaultValue" -> "false",
+          "actualType" -> "\"BOOLEAN\""))
       // The default value is disabled per configuration.
       withSQLConf(SQLConf.ENABLE_DEFAULT_COLUMNS.key -> "false") {
-        assert(intercept[ParseException] {
-          sql("alter table t alter column s set default 41 + 1")
-        }.getMessage.contains("Support for DEFAULT column values is not allowed"))
+        val sqlText = "alter table t alter column s set default 41 + 1"
+        checkError(
+          exception = intercept[ParseException] {
+            sql(sqlText)
+          },
+          errorClass = "UNSUPPORTED_DEFAULT_VALUE.WITH_SUGGESTION",
+          parameters = Map.empty,
+          context = ExpectedContext(
+            fragment = sqlText,
+            start = 0,
+            stop = 46))
       }
     }
     // Attempting to set a default value for a partitioning column is not allowed.
     withTable("t") {
       sql("create table t(i boolean, s bigint, q int default 42) using parquet partitioned by (i)")
-      assert(intercept[AnalysisException] {
-        sql("alter table t alter column i set default false")
-      }.getMessage.contains("Can't find column `i` given table data columns [`s`, `q`]"))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("alter table t alter column i set default false")
+        },
+        errorClass = "CANNOT_ALTER_PARTITION_COLUMN",
+        parameters = Map("tableName" -> "`spark_catalog`.`default`.`t`", "columnName" -> "`i`")
+      )
     }
   }
 
   test("INSERT rows, ALTER TABLE ADD COLUMNS with DEFAULTs, then SELECT them") {
     case class Config(
         sqlConf: Option[(String, String)],
-        insertNullsToStorage: Boolean = true)
+        useDataFrames: Boolean = false)
     def runTest(dataSource: String, config: Config): Unit = {
+      def insertIntoT(): Unit = {
+        sql("insert into t(a, i) values('xyz', 42)")
+      }
       def withTableT(f: => Unit): Unit = {
         sql(s"create table t(a string, i int) using $dataSource")
-        sql("insert into t values('xyz', 42)")
+        insertIntoT()
         withTable("t") { f }
       }
       // Positive tests:
@@ -1543,12 +1847,13 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       // default values.
       withTableT {
         sql("alter table t add column (s string default concat('abc', 'def'))")
-        sql("insert into t values(null, null, null)")
+        if (config.useDataFrames) {
+          Seq((null, null, null)).toDF().write.insertInto("t")
+        } else {
+          sql("insert into t values(null, null, null)")
+        }
         sql("alter table t add column (x boolean default true)")
-        // By default, INSERT commands into some tables (such as JSON) do not store NULL values.
-        // Therefore, if such destination columns have DEFAULT values, SELECTing the same columns
-        // will return the default values (instead of NULL) since nothing is present in storage.
-        val insertedSColumn = if (config.insertNullsToStorage) null else "abcdef"
+        val insertedSColumn = null
         checkAnswer(spark.table("t"),
           Seq(
             Row("xyz", 42, "abcdef", true),
@@ -1575,34 +1880,35 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
           "u short default cast(42 as short), " +
           "v float default 0, " +
           "w double default 0, " +
-          "x date default date'0000', " +
-          "y timestamp default timestamp'0000', " +
-          "z timestamp_ntz default cast(timestamp'0000' as timestamp_ntz), " +
-          "a1 timestamp_ltz default cast(timestamp'0000' as timestamp_ltz), " +
+          "x date default cast('2021-01-02' as date), " +
+          "y timestamp default cast('2021-01-02 01:01:01' as timestamp), " +
+          "z timestamp_ntz default cast('2021-01-02 01:01:01' as timestamp_ntz), " +
+          "a1 timestamp_ltz default cast('2021-01-02 01:01:01' as timestamp_ltz), " +
           "a2 decimal(5, 2) default 123.45," +
           "a3 bigint default 43," +
           "a4 smallint default cast(5 as smallint)," +
           "a5 tinyint default cast(6 as tinyint))")
+        insertIntoT()
         // Manually inspect the result row values rather than using the 'checkAnswer' helper method
         // in order to ensure the values' correctness while avoiding minor type incompatibilities.
         val result: Array[Row] =
           sql("select s, t, u, v, w, x, y, z, a1, a2, a3, a4, a5 from t").collect()
-        assert(result.length == 1)
-        val row: Row = result(0)
-        assert(row.length == 13)
-        assert(row(0) == true)
-        assert(row(1) == null)
-        assert(row(2) == 42)
-        assert(row(3) == 0.0f)
-        assert(row(4) == 0.0d)
-        assert(row(5).toString == "0001-01-01")
-        assert(row(6).toString == "0001-01-01 00:00:00.0")
-        assert(row(7).toString == "0000-01-01T00:00")
-        assert(row(8).toString == "0001-01-01 00:00:00.0")
-        assert(row(9).toString == "123.45")
-        assert(row(10) == 43L)
-        assert(row(11) == 5)
-        assert(row(12) == 6)
+        for (row <- result) {
+          assert(row.length == 13)
+          assert(row(0) == true)
+          assert(row(1) == null)
+          assert(row(2) == 42)
+          assert(row(3) == 0.0f)
+          assert(row(4) == 0.0d)
+          assert(row(5).toString == "2021-01-02")
+          assert(row(6).toString == "2021-01-02 01:01:01.0")
+          assert(row(7).toString.startsWith("2021-01-02"))
+          assert(row(8).toString == "2021-01-02 01:01:01.0")
+          assert(row(9).toString == "123.45")
+          assert(row(10) == 43L)
+          assert(row(11) == 5)
+          assert(row(12) == 6)
+        }
       }
     }
 
@@ -1623,8 +1929,7 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
         dataSource = "json",
         Seq(
           Config(
-            None,
-            insertNullsToStorage = false),
+            None),
           Config(
             Some(SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key -> "false")))),
       TestCase(
@@ -1633,68 +1938,471 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
           Config(
             None),
           Config(
-            Some(SQLConf.ORC_VECTORIZED_READER_ENABLED.key -> "false"),
-            insertNullsToStorage = false))),
+            Some(SQLConf.ORC_VECTORIZED_READER_ENABLED.key -> "false")))),
       TestCase(
         dataSource = "parquet",
         Seq(
           Config(
             None),
           Config(
-            Some(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key -> "false"),
-            insertNullsToStorage = false)))
+            Some(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key -> "false"))))
     ).foreach { testCase: TestCase =>
       testCase.configs.foreach { config: Config =>
-        config.sqlConf.map { kv: (String, String) =>
-          withSQLConf(kv) {
-            // Run the test with the pair of custom SQLConf values.
-            runTest(testCase.dataSource, config)
+        // Run the test twice, once using SQL for the INSERT operations and again using DataFrames.
+        for (useDataFrames <- Seq(false, true)) {
+          config.sqlConf.map { kv: (String, String) =>
+            withSQLConf(kv) {
+              // Run the test with the pair of custom SQLConf values.
+              runTest(testCase.dataSource, config.copy(useDataFrames = useDataFrames))
+            }
+          }.getOrElse {
+            // Run the test with default settings.
+            runTest(testCase.dataSource, config.copy(useDataFrames = useDataFrames))
           }
-        }.getOrElse {
-          // Run the test with default settings.
-          runTest(testCase.dataSource, config)
         }
+      }
+    }
+  }
+
+  test("SPARK-39985 Enable implicit DEFAULT column values in inserts from DataFrames") {
+    // Negative test: explicit column "default" references are not supported in write operations
+    // from DataFrames: since the operators are resolved one-by-one, any .select referring to
+    // "default" generates a "column not found" error before any following .insertInto.
+    withTable("t") {
+      sql(s"create table t(a string, i int default 42) using parquet")
+      checkError(
+        exception = intercept[AnalysisException] {
+          Seq("xyz").toDF().select("value", "default").write.insertInto("t")
+        },
+        errorClass = "UNRESOLVED_COLUMN.WITH_SUGGESTION",
+        parameters = Map("objectName" -> "`default`", "proposal" -> "`value`"),
+        context =
+          ExpectedContext(fragment = "select", callSitePattern = getCurrentClassCallSitePattern))
+    }
+  }
+
+  test("SPARK-40001 JSON DEFAULT columns = JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE off") {
+    // Check that the JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE config overrides the
+    // JSON_GENERATOR_IGNORE_NULL_FIELDS config.
+    withSQLConf(SQLConf.JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE.key -> "true",
+      SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key -> "true") {
+      withTable("t") {
+        sql("create table t (a int default 42) using json")
+        sql("insert into t values (null)")
+        checkAnswer(spark.table("t"), Row(null))
+      }
+    }
+    withSQLConf(SQLConf.JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE.key -> "false",
+      SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key -> "true") {
+      withTable("t") {
+        sql("create table t (a int default 42) using json")
+        sql("insert into t values (null)")
+        checkAnswer(spark.table("t"), Row(42))
       }
     }
   }
 
   test("SPARK-39359 Restrict DEFAULT columns to allowlist of supported data source types") {
     withSQLConf(SQLConf.DEFAULT_COLUMN_ALLOWED_PROVIDERS.key -> "csv,json,orc") {
-      val unsupported = "DEFAULT values are not supported for target data source"
-      assert(intercept[AnalysisException] {
-        sql(s"create table t(a string default 'abc') using parquet")
-      }.getMessage.contains(unsupported))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql(s"create table t(a string default 'abc') using parquet")
+        },
+        errorClass = "_LEGACY_ERROR_TEMP_1345",
+        parameters = Map("statementType" -> "CREATE TABLE", "dataSource" -> "parquet"))
       withTable("t") {
         sql(s"create table t(a string, b int) using parquet")
-        assert(intercept[AnalysisException] {
-          sql("alter table t add column s bigint default 42")
-        }.getMessage.contains(unsupported))
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("alter table t add column s bigint default 42")
+          },
+          errorClass = "_LEGACY_ERROR_TEMP_1345",
+          parameters = Map(
+            "statementType" -> "ALTER TABLE ADD COLUMNS",
+            "dataSource" -> "parquet"))
       }
     }
   }
 
+  test("SPARK-39557 INSERT INTO statements with tables with array defaults") {
+    // Positive tests: array types are supported as default values.
+    case class Config(
+        dataSource: String,
+        useDataFrames: Boolean = false)
+    Seq(
+      Config(
+        "parquet"),
+      Config(
+        "parquet",
+        useDataFrames = true),
+      Config(
+        "json"),
+      Config(
+        "json",
+        useDataFrames = true),
+      Config(
+        "orc"),
+      Config(
+        "orc",
+        useDataFrames = true)).foreach { config =>
+      withTable("t") {
+        sql(s"create table t(i boolean) using ${config.dataSource}")
+        if (config.useDataFrames) {
+          Seq(false).toDF().write.insertInto("t")
+        } else {
+          sql("insert into t select false")
+        }
+        sql("alter table t add column s array<int> default array(1, 2)")
+        checkAnswer(spark.table("t"), Row(false, Seq(1, 2)))
+      }
+    }
+    // Negative tests: provided array element types must match their corresponding DEFAULT
+    // declarations, if applicable.
+    Seq(
+      Config(
+        "parquet"),
+      Config(
+        "parquet",
+        true)).foreach { config =>
+      withTable("t") {
+        sql(s"create table t(i boolean) using ${config.dataSource}")
+        if (config.useDataFrames) {
+          Seq((false)).toDF().write.insertInto("t")
+        } else {
+          sql("insert into t select false")
+        }
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("alter table t add column s array<int> default array('abc', 'def')")
+          },
+          errorClass = "INVALID_DEFAULT_VALUE.DATA_TYPE",
+          parameters = Map(
+            "statement" -> "ALTER TABLE ADD COLUMNS",
+            "colName" -> "`s`",
+            "expectedType" -> "\"ARRAY<INT>\"",
+            "defaultValue" -> "array('abc', 'def')",
+            "actualType" -> "\"ARRAY<STRING>\""))
+      }
+    }
+  }
+
+  test("SPARK-39557 INSERT INTO statements with tables with struct defaults") {
+    // Positive tests: struct types are supported as default values.
+    case class Config(
+        dataSource: String,
+        useDataFrames: Boolean = false)
+    Seq(
+      Config(
+        "parquet"),
+      Config(
+        "parquet",
+        useDataFrames = true),
+      Config(
+        "json"),
+      Config(
+        "json",
+        useDataFrames = true),
+      Config(
+        "orc"),
+      Config(
+        "orc",
+        useDataFrames = true)).foreach { config =>
+      withTable("t") {
+        sql(s"create table t(i boolean) using ${config.dataSource}")
+        if (config.useDataFrames) {
+          Seq((false)).toDF().write.insertInto("t")
+        } else {
+          sql("insert into t select false")
+        }
+        sql("alter table t add column s struct<x boolean, y string> default struct(true, 'abc')")
+        checkAnswer(spark.table("t"), Row(false, Row(true, "abc")))
+      }
+    }
+
+    // Negative tests: provided map element types must match their corresponding DEFAULT
+    // declarations, if applicable.
+    Seq(
+      Config(
+        "parquet"),
+      Config(
+        "parquet",
+        true)).foreach { config =>
+      withTable("t") {
+        sql(s"create table t(i boolean) using ${config.dataSource}")
+        if (config.useDataFrames) {
+          Seq((false)).toDF().write.insertInto("t")
+        } else {
+          sql("insert into t select false")
+        }
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("alter table t add column s struct<x boolean, y string> default struct(42, 56)")
+          },
+          errorClass = "INVALID_DEFAULT_VALUE.DATA_TYPE",
+          parameters = Map(
+            "statement" -> "ALTER TABLE ADD COLUMNS",
+            "colName" -> "`s`",
+            "expectedType" -> "\"STRUCT<x: BOOLEAN, y: STRING>\"",
+            "defaultValue" -> "struct(42, 56)",
+            "actualType" -> "\"STRUCT<col1: INT NOT NULL, col2: INT NOT NULL>\""))
+      }
+    }
+  }
+
+  test("SPARK-39557 INSERT INTO statements with tables with map defaults") {
+    // Positive tests: map types are supported as default values.
+    case class Config(
+        dataSource: String,
+        useDataFrames: Boolean = false)
+    Seq(
+      Config(
+        "parquet"),
+      Config(
+        "parquet",
+        useDataFrames = true),
+      // SPARK-47029: ALTER COLUMN DROP DEFAULT fails to work correctly with JSON data sources.
+      /*
+      Config(
+        "json"),
+        */
+      Config(
+        "json",
+        useDataFrames = true),
+      Config(
+        "orc"),
+      Config(
+        "orc",
+        useDataFrames = true)).foreach { config =>
+      withTable("t") {
+        sql(s"create table t(i boolean) using ${config.dataSource}")
+        if (config.useDataFrames) {
+          Seq((false)).toDF().write.insertInto("t")
+        } else {
+          sql("insert into t select false")
+        }
+        sql("alter table t add column s map<string, boolean> default map('abc', true)")
+        checkAnswer(spark.table("t"), Row(false, Map("abc" -> true)))
+      }
+      withTable("t") {
+        sql(
+          s"""
+            create table t(
+              i int,
+              s struct<
+                x array<
+                  struct<a int, b int>>,
+                y array<
+                  map<string, boolean>>>
+              default struct(
+                array(
+                  struct(1, 2)),
+                array(
+                  map('def', false, 'jkl', true))))
+              using ${config.dataSource}""")
+        sql("insert into t select 1, default")
+        sql("alter table t alter column s drop default")
+        if (config.useDataFrames) {
+          Seq((2, null)).toDF().write.insertInto("t")
+        } else {
+          sql("insert into t select 2, default")
+        }
+        sql(
+          """
+            alter table t alter column s
+            set default struct(
+              array(
+                struct(3, 4)),
+              array(
+                map('mno', false, 'pqr', true)))""")
+        sql("insert into t select 3, default")
+        sql(
+          """
+            alter table t
+            add column t array<
+              map<string, boolean>>
+            default array(
+              map('xyz', true))""")
+        sql("insert into t(i, s) select 4, default")
+        checkAnswer(spark.table("t"),
+          Seq(
+            Row(1,
+              Row(Seq(Row(1, 2)), Seq(Map("def" -> false, "jkl" -> true))),
+              Seq(Map("xyz" -> true))),
+            Row(2,
+              null,
+              Seq(Map("xyz" -> true))),
+            Row(3,
+              Row(Seq(Row(3, 4)), Seq(Map("mno" -> false, "pqr" -> true))),
+              Seq(Map("xyz" -> true))),
+            Row(4,
+              Row(Seq(Row(3, 4)), Seq(Map("mno" -> false, "pqr" -> true))),
+              Seq(Map("xyz" -> true)))))
+      }
+    }
+    // Negative tests: provided map element types must match their corresponding DEFAULT
+    // declarations, if applicable.
+    Seq(
+      Config(
+        "parquet"),
+      Config(
+        "parquet",
+        true)).foreach { config =>
+      withTable("t") {
+        sql(s"create table t(i boolean) using ${config.dataSource}")
+        if (config.useDataFrames) {
+          Seq((false)).toDF().write.insertInto("t")
+        } else {
+          sql("insert into t select false")
+        }
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql("alter table t add column s map<boolean, string> default map(42, 56)")
+          },
+          errorClass = "INVALID_DEFAULT_VALUE.DATA_TYPE",
+          parameters = Map(
+            "statement" -> "ALTER TABLE ADD COLUMNS",
+            "colName" -> "`s`",
+            "expectedType" -> "\"MAP<BOOLEAN, STRING>\"",
+            "defaultValue" -> "map(42, 56)",
+            "actualType" -> "\"MAP<INT, INT>\""))
+      }
+    }
+  }
+
+  test("SPARK-39643 Prohibit subquery expressions in DEFAULT values") {
+    checkError(
+      exception = intercept[AnalysisException] {
+        sql("create table t(a string default (select 'abc')) using parquet")
+      },
+      errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+      parameters = Map(
+        "statement" -> "CREATE TABLE",
+        "colName" -> "`a`",
+        "defaultValue" -> "(select 'abc')"))
+    checkError(
+      exception = intercept[AnalysisException] {
+        sql("create table t(a string default exists(select 42 where true)) using parquet")
+      },
+      errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+      parameters = Map(
+        "statement" -> "CREATE TABLE",
+        "colName" -> "`a`",
+        "defaultValue" -> "exists(select 42 where true)"))
+    checkError(
+      exception = intercept[AnalysisException] {
+        sql("create table t(a string default 1 in (select 1 union all select 2)) using parquet")
+      },
+      errorClass = "INVALID_DEFAULT_VALUE.SUBQUERY_EXPRESSION",
+      parameters = Map(
+        "statement" -> "CREATE TABLE",
+        "colName" -> "`a`",
+        "defaultValue" -> "1 in (select 1 union all select 2)"))
+  }
+
+  test("SPARK-39844 Restrict adding DEFAULT columns for existing tables to certain sources") {
+    Seq("csv", "json", "orc", "parquet").foreach { provider =>
+      withTable("t1") {
+        // Set the allowlist of table providers to include the new table type for all SQL commands.
+        withSQLConf(SQLConf.DEFAULT_COLUMN_ALLOWED_PROVIDERS.key -> provider) {
+          // It is OK to create a new table with a column DEFAULT value assigned if the table
+          // provider is in the allowlist.
+          sql(s"create table t1(a int default 42) using $provider")
+          // It is OK to add a new column to the table with a DEFAULT value to the existing table
+          // since this table provider is not yet present in the
+          // 'ADD_DEFAULT_COLUMN_EXISTING_TABLE_BANNED_PROVIDERS' denylist.
+          sql(s"alter table t1 add column (b string default 'abc')")
+          // Insert a row into the table and check that the assigned DEFAULT value is correct.
+          sql(s"insert into t1 values (42, default)")
+          checkAnswer(spark.table("t1"), Row(42, "abc"))
+        }
+        // Now update the allowlist of table providers to prohibit ALTER TABLE ADD COLUMN commands
+        // from assigning DEFAULT values.
+        withSQLConf(SQLConf.DEFAULT_COLUMN_ALLOWED_PROVIDERS.key -> s"$provider*") {
+          checkError(
+            exception = intercept[AnalysisException] {
+              // Try to add another column to the existing table again. This fails because the table
+              // provider is now in the denylist.
+              sql(s"alter table t1 add column (b string default 'abc')")
+            },
+            errorClass = "_LEGACY_ERROR_TEMP_1346",
+            parameters = Map(
+              "statementType" -> "ALTER TABLE ADD COLUMNS",
+              "dataSource" -> provider))
+          withTable("t2") {
+            // It is still OK to create a new table with a column DEFAULT value assigned, even if
+            // the table provider is in the above denylist.
+            sql(s"create table t2(a int default 42) using $provider")
+            // Insert a row into the table and check that the assigned DEFAULT value is correct.
+            sql(s"insert into t2 values (default)")
+            checkAnswer(spark.table("t2"), Row(42))
+          }
+        }
+      }
+    }
+  }
+
+  test("SPARK-43071: INSERT INTO from queries whose final operators are not projections") {
+    def runTest(insert: String, expected: Seq[Row]): Unit = {
+      withTable("t1", "t2") {
+        sql("create table t1(i boolean, s bigint default 42) using parquet")
+        sql("insert into t1 values (true, 41), (false, default)")
+        sql("create table t2(i boolean default true, s bigint default 42, " +
+          "t string default 'abc') using parquet")
+        sql(insert)
+        checkAnswer(spark.table("t2"), expected)
+      }
+    }
+    def expectFail(insert: String): Unit = {
+      withTable("t1", "t2") {
+        sql("create table t1(i boolean, s bigint default 42) using parquet")
+        sql("insert into t1 values (true, 41), (false, default)")
+        sql("create table t2(i boolean default true, s bigint default 42, " +
+          "t string default 'abc') using parquet")
+        assert(intercept[AnalysisException](sql(insert)).errorClass.get.startsWith(
+          "UNRESOLVED_COLUMN"))
+      }
+    }
+    // The DEFAULT references in these query patterns are detected and replaced.
+    runTest("insert into t2 (i, s) select default, s from t1 order by s limit 1",
+      Seq(Row(true, 41L, "abc")))
+    runTest("insert into t2 (i, s) select default, s from t1 order by s limit 1 offset 1",
+      Seq(Row(true, 42L, "abc")))
+    runTest("insert into t2 (i, s) select default, default from t1 inner join t1 using (i, s)",
+      Seq(Row(true, 42L, "abc"),
+        Row(true, 42L, "abc")))
+    // The DEFAULT references in these query patterns are not detected.
+    expectFail("insert into t2 (i, s) select default, 41L union all select default, 42L")
+    expectFail("insert into t2 (i, s) select default, min(s) from t1 group by i")
+  }
+
   test("Stop task set if FileAlreadyExistsException was thrown") {
+    val tableName = "t"
     Seq(true, false).foreach { fastFail =>
       withSQLConf("fs.file.impl" -> classOf[FileExistingTestFileSystem].getName,
         "fs.file.impl.disable.cache" -> "true",
         SQLConf.FASTFAIL_ON_FILEFORMAT_OUTPUT.key -> fastFail.toString) {
-        withTable("t") {
+        withTable(tableName) {
           sql(
-            """
-              |CREATE TABLE t(i INT, part1 INT) USING PARQUET
+            s"""
+              |CREATE TABLE $tableName(i INT, part1 INT) USING PARQUET
               |PARTITIONED BY (part1)
           """.stripMargin)
 
           val df = Seq((1, 1)).toDF("i", "part1")
           val err = intercept[SparkException] {
-            df.write.mode("overwrite").format("parquet").insertInto("t")
+            df.write.mode("overwrite").format("parquet").insertInto(tableName)
           }
 
           if (fastFail) {
-            assert(err.getCause.getMessage.contains("can not write to output file: " +
+            assert(err.getMessage.contains("can not write to output file: " +
               "org.apache.hadoop.fs.FileAlreadyExistsException"))
           } else {
-            assert(err.getCause.getMessage.contains("Task failed while writing rows"))
+            checkError(
+              exception = err,
+              errorClass = "TASK_WRITE_FAILED",
+              parameters = Map("path" -> s".*$tableName"),
+              matchPVals = true
+            )
           }
         }
       }
@@ -1717,10 +2425,16 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
   }
 
   test("SPARK-29174 fail LOCAL in INSERT OVERWRITE DIRECT remote path") {
-    val message = intercept[ParseException] {
-      sql("insert overwrite local directory 'hdfs:/abcd' using parquet select 1")
-    }.getMessage
-    assert(message.contains("LOCAL is supported only with file: scheme"))
+    checkError(
+      exception = intercept[ParseException] {
+        sql("insert overwrite local directory 'hdfs:/abcd' using parquet select 1")
+      },
+      errorClass = "LOCAL_MUST_WITH_SCHEMA_FILE",
+      parameters = Map("actualSchema" -> "hdfs"),
+      context = ExpectedContext(
+        fragment = "insert overwrite local directory 'hdfs:/abcd' using parquet",
+        start = 0,
+        stop = 58))
   }
 
   test("SPARK-32508 " +
@@ -1731,13 +2445,24 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
           |CREATE TABLE insertTable(i int, part1 string, part2 string) USING PARQUET
           |PARTITIONED BY (part1, part2)
             """.stripMargin)
-      val msg = "Partition spec is invalid"
-      assert(intercept[AnalysisException] {
-        sql("INSERT INTO TABLE insertTable PARTITION(part1=1, part2='') SELECT 1")
-      }.getMessage.contains(msg))
-      assert(intercept[AnalysisException] {
-        sql("INSERT INTO TABLE insertTable PARTITION(part1='', part2) SELECT 1 ,'' AS part2")
-      }.getMessage.contains(msg))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("INSERT INTO TABLE insertTable PARTITION(part1=1, part2='') SELECT 1")
+        },
+        errorClass = "_LEGACY_ERROR_TEMP_1076",
+        parameters = Map(
+          "details" -> ("The spec ([part1=Some(1), part2=Some()]) " +
+            "contains an empty partition column value"))
+      )
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql("INSERT INTO TABLE insertTable PARTITION(part1='', part2) SELECT 1 ,'' AS part2")
+        },
+        errorClass = "_LEGACY_ERROR_TEMP_1076",
+        parameters = Map(
+          "details" -> ("The spec ([part1=Some(), part2=None]) " +
+            "contains an empty partition column value"))
+      )
 
       sql("INSERT INTO TABLE insertTable PARTITION(part1='1', part2='2') SELECT 1")
       sql("INSERT INTO TABLE insertTable PARTITION(part1='1', part2) SELECT 1 ,'2' AS part2")
@@ -1747,19 +2472,28 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
 
   test("SPARK-33294: Add query resolved check before analyze InsertIntoDir") {
     withTempPath { path =>
-      val ex = intercept[AnalysisException] {
-        sql(
-          s"""
-            |INSERT OVERWRITE DIRECTORY '${path.getAbsolutePath}' USING PARQUET
-            |SELECT * FROM (
-            | SELECT c3 FROM (
-            |  SELECT c1, c2 from values(1,2) t(c1, c2)
-            |  )
-            |)
-          """.stripMargin)
-      }
-      assert(ex.getErrorClass == "UNRESOLVED_COLUMN")
-      assert(ex.messageParameters.head == "`c3`")
+      val insert = s"INSERT OVERWRITE DIRECTORY '${path.getAbsolutePath}' USING PARQUET"
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql(
+            s"""
+              |$insert
+              |SELECT * FROM (
+              | SELECT c3 FROM (
+              |  SELECT c1, c2 from values(1,2) t(c1, c2)
+              |  )
+              |)
+            """.stripMargin)
+        },
+        errorClass = "UNRESOLVED_COLUMN.WITH_SUGGESTION",
+        sqlState = "42703",
+        parameters = Map(
+          "objectName" -> "`c3`",
+          "proposal" -> "`c1`, `c2`"),
+        context = ExpectedContext(
+          fragment = "c3",
+          start = insert.length + 26,
+          stop = insert.length + 27))
     }
   }
 
@@ -1849,10 +2583,9 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
 
           sql(s"alter table t add partition(part1=1, part2=1) location '${path.getAbsolutePath}'")
 
-          val e = intercept[SparkException] {
+          val e = intercept[IOException] {
             sql(s"insert into t partition(part1=1, part2=1) select 1")
-          }.getCause
-          assert(e.isInstanceOf[IOException])
+          }
           assert(e.getMessage.contains("Failed to rename"))
           assert(e.getMessage.contains("when committing files staged for absolute location"))
         }
@@ -1873,10 +2606,9 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
             |partitioned by (part1, part2)
           """.stripMargin)
 
-        val e = intercept[SparkException] {
+        val e = intercept[IOException] {
           sql(s"insert overwrite table t partition(part1, part2) values (1, 1, 1)")
-        }.getCause
-        assert(e.isInstanceOf[IOException])
+        }
         assert(e.getMessage.contains("Failed to rename"))
         assert(e.getMessage.contains(
           "when committing files staged for overwriting dynamic partitions"))
@@ -1899,14 +2631,12 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
       checkAnswer(spark.table("t1"), Row(1, "str1"))
     }
 
-    withSQLConf(SQLConf.USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES.key -> "true") {
-      withTable("t1") {
-        sql("CREATE TABLE t1(c1 int, c2 string, c3 int) using parquet")
-        sql("INSERT INTO TABLE t1 select * from jt where a=1")
-        checkAnswer(spark.table("t1"), Row(1, "str1", null))
-        sql("INSERT INTO TABLE t1 select *, 2 from jt where a=2")
-        checkAnswer(spark.table("t1"), Seq(Row(1, "str1", null), Row(2, "str2", 2)))
-      }
+    withTable("t1") {
+      sql("CREATE TABLE t1(c1 int, c2 string, c3 int) using parquet")
+      sql("INSERT INTO TABLE t1(c1, c2) select * from jt where a=1")
+      checkAnswer(spark.table("t1"), Row(1, "str1", null))
+      sql("INSERT INTO TABLE t1 select *, 2 from jt where a=2")
+      checkAnswer(spark.table("t1"), Seq(Row(1, "str1", null), Row(2, "str2", 2)))
     }
   }
 
@@ -1939,6 +2669,75 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
               Row(4, Period.ofYears(5), Duration.ofDays(6)),
               Row(7, Period.ofYears(8), Duration.ofDays(9))))
         }
+      }
+    }
+  }
+
+  test("SPARK-42286: Insert into a table select from case when with cast, positive test") {
+    withTable("t1", "t2") {
+      sql("create table t1 (x int) using parquet")
+      sql("insert into t1 values (1), (2)")
+      sql("create table t2 (x Decimal(9, 0)) using parquet")
+      sql("insert into t2 select 0 - (case when x = 1 then 1 else x end) from t1 where x = 1")
+      checkAnswer(spark.table("t2"), Row(-1))
+    }
+  }
+
+  test("SPARK-46370: Querying a table should not invalidate the column defaults") {
+    withTable("t") {
+      // Create a table and insert some rows into it, changing the default value of a column
+      // throughout.
+      spark.sql("CREATE TABLE t(i INT, s STRING DEFAULT 'def') USING CSV")
+      spark.sql("INSERT INTO t SELECT 1, DEFAULT")
+      spark.sql("ALTER TABLE t ALTER COLUMN s DROP DEFAULT")
+      spark.sql("INSERT INTO t SELECT 2, DEFAULT")
+      // Run a query to trigger the table relation cache.
+      val results = spark.table("t").collect()
+      assert(results.length == 2)
+      // Change the column default value and insert another row. Then query the table's contents
+      // and the results should be correct.
+      spark.sql("ALTER TABLE t ALTER COLUMN s SET DEFAULT 'mno'")
+      spark.sql("INSERT INTO t SELECT 3, DEFAULT").collect()
+      checkAnswer(
+        spark.table("t"),
+        Seq(
+          Row(1, "def"),
+          Row(2, null),
+          Row(3, "mno")))
+    }
+  }
+
+  test("UNSUPPORTED_OVERWRITE.TABLE: Can't overwrite a table that is also being read from") {
+    val tableName = "t1"
+    withTable(tableName) {
+      sql(s"CREATE TABLE $tableName (a STRING, b INT) USING parquet")
+      checkError(
+        exception = intercept[AnalysisException] {
+          spark.table(tableName).write.mode(SaveMode.Overwrite).saveAsTable(tableName)
+        },
+        errorClass = "UNSUPPORTED_OVERWRITE.TABLE",
+        parameters = Map("table" -> s"`spark_catalog`.`default`.`$tableName`")
+      )
+    }
+  }
+
+  test("UNSUPPORTED_OVERWRITE.PATH: Can't overwrite a path that is also being read from") {
+    val tableName = "t1"
+    withTable(tableName) {
+      withTempDir { dir =>
+        val path = dir.getCanonicalPath
+        sql(s"CREATE TABLE $tableName(i int) USING parquet LOCATION '$path'")
+        val insertDirSql =
+          s"""
+             |INSERT OVERWRITE LOCAL DIRECTORY '$path'
+             |USING parquet
+             |SELECT i from $tableName""".stripMargin
+        checkError(
+          exception = intercept[AnalysisException] {
+            sql(insertDirSql)
+          },
+          errorClass = "UNSUPPORTED_OVERWRITE.PATH",
+          parameters = Map("path" -> ("file:" + path)))
       }
     }
   }

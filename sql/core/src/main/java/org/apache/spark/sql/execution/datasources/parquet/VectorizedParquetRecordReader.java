@@ -23,13 +23,18 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import scala.collection.JavaConverters;
+
+import org.apache.spark.SparkUnsupportedOperationException;
+import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns;
+import scala.Option;
+import scala.jdk.javaapi.CollectionConverters;
 
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.page.PageReadStore;
+import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.Type;
@@ -38,6 +43,8 @@ import org.apache.spark.memory.MemoryMode;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.execution.vectorized.ColumnVectorUtils;
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
+import org.apache.spark.sql.execution.vectorized.OffHeapColumnVector;
+import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector;
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector;
 import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
@@ -131,6 +138,11 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
   private boolean returnColumnarBatch;
 
   /**
+   * Populates the row index column if needed.
+   */
+  private ParquetRowIndexUtil.RowIndexGenerator rowIndexGenerator = null;
+
+  /**
    * The memory mode of the columnarBatch
    */
   private final MemoryMode MEMORY_MODE;
@@ -171,6 +183,16 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
   public void initialize(InputSplit inputSplit, TaskAttemptContext taskAttemptContext)
       throws IOException, InterruptedException, UnsupportedOperationException {
     super.initialize(inputSplit, taskAttemptContext);
+    initializeInternal();
+  }
+
+  @Override
+  public void initialize(
+      InputSplit inputSplit,
+      TaskAttemptContext taskAttemptContext,
+      Option<ParquetMetadata> fileFooter)
+      throws IOException, InterruptedException, UnsupportedOperationException {
+    super.initialize(inputSplit, taskAttemptContext, fileFooter);
     initializeInternal();
   }
 
@@ -239,10 +261,8 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
       MemoryMode memMode,
       StructType partitionColumns,
       InternalRow partitionValues) {
-    StructType batchSchema = new StructType();
-    for (StructField f: sparkSchema.fields()) {
-      batchSchema = batchSchema.add(f);
-    }
+    StructType batchSchema = new StructType(sparkSchema.fields());
+
     int constantColumnLength = 0;
     if (partitionColumns != null) {
       for (StructField f : partitionColumns.fields()) {
@@ -251,7 +271,7 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
       constantColumnLength = partitionColumns.fields().length;
     }
 
-    ColumnVector[] vectors = ColumnVectorUtils.allocateColumns(
+    ColumnVector[] vectors = allocateColumns(
       capacity, batchSchema, memMode == MemoryMode.OFF_HEAP, constantColumnLength);
 
     columnarBatch = new ColumnarBatch(vectors);
@@ -260,7 +280,7 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
     for (int i = 0; i < columnVectors.length; i++) {
       Object defaultValue = null;
       if (sparkRequestedSchema != null) {
-        defaultValue = sparkRequestedSchema.existenceDefaultValues()[i];
+        defaultValue = ResolveDefaultColumns.existenceDefaultValues(sparkRequestedSchema)[i];
       }
       columnVectors[i] = new ParquetColumnVector(parquetColumn.children().apply(i),
         (WritableColumnVector) vectors[i], capacity, memMode, missingColumns, true, defaultValue);
@@ -273,6 +293,8 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
           (ConstantColumnVector) vectors[i + partitionIdx], partitionValues, i);
       }
     }
+
+    rowIndexGenerator = ParquetRowIndexUtil.createGeneratorIfNeeded(sparkSchema);
   }
 
   private void initBatch() {
@@ -322,6 +344,10 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
       }
       cv.assemble();
     }
+    // If needed, compute row indexes within a file.
+    if (rowIndexGenerator != null) {
+      rowIndexGenerator.populateRowIndex(columnVectors, num);
+    }
 
     rowsReturned += num;
     columnarBatch.setNumRows(num);
@@ -332,7 +358,7 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
 
   private void initializeInternal() throws IOException, UnsupportedOperationException {
     missingColumns = new HashSet<>();
-    for (ParquetColumn column : JavaConverters.seqAsJavaList(parquetColumn.children())) {
+    for (ParquetColumn column : CollectionConverters.asJava(parquetColumn.children())) {
       checkColumn(column);
     }
   }
@@ -342,16 +368,16 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
    * conforms to the type of the file schema.
    */
   private void checkColumn(ParquetColumn column) throws IOException {
-    String[] path = JavaConverters.seqAsJavaList(column.path()).toArray(new String[0]);
+    String[] path = CollectionConverters.asJava(column.path()).toArray(new String[0]);
     if (containsPath(fileSchema, path)) {
       if (column.isPrimitive()) {
         ColumnDescriptor desc = column.descriptor().get();
         ColumnDescriptor fd = fileSchema.getColumnDescription(desc.getPath());
         if (!fd.equals(desc)) {
-          throw new UnsupportedOperationException("Schema evolution not supported.");
+          throw new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_3185");
         }
       } else {
-        for (ParquetColumn childColumn : JavaConverters.seqAsJavaList(column.children())) {
+        for (ParquetColumn childColumn : CollectionConverters.asJava(column.children())) {
           checkColumn(childColumn);
         }
       }
@@ -376,9 +402,8 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
 
   private boolean containsPath(Type parquetType, String[] path, int depth) {
     if (path.length == depth) return true;
-    if (parquetType instanceof GroupType) {
+    if (parquetType instanceof GroupType parquetGroupType) {
       String fieldName = path[depth];
-      GroupType parquetGroupType = (GroupType) parquetType;
       if (parquetGroupType.containsField(fieldName)) {
         return containsPath(parquetGroupType.getType(fieldName), path, depth + 1);
       }
@@ -392,6 +417,9 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
     if (pages == null) {
       throw new IOException("expecting more rows but reached last block. Read "
           + rowsReturned + " out of " + totalRowCount);
+    }
+    if (rowIndexGenerator != null) {
+      rowIndexGenerator.initFromPageReadStore(pages);
     }
     for (ParquetColumnVector cv : columnVectors) {
       initColumnReader(pages, cv);
@@ -414,5 +442,37 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
         }
       }
     }
+  }
+
+  /**
+   * <b>This method assumes that all constant column are at the end of schema
+   * and `constantColumnLength` represents the number of constant column.<b/>
+   *
+   * This method allocates columns to store elements of each field of the schema,
+   * the data columns use `OffHeapColumnVector` when `useOffHeap` is true and
+   * use `OnHeapColumnVector` when `useOffHeap` is false, the constant columns
+   * always use `ConstantColumnVector`.
+   *
+   * Capacity is the initial capacity of the vector, and it will grow as necessary.
+   * Capacity is in number of elements, not number of bytes.
+   */
+  private ColumnVector[] allocateColumns(
+      int capacity, StructType schema, boolean useOffHeap, int constantColumnLength) {
+    StructField[] fields = schema.fields();
+    int fieldsLength = fields.length;
+    ColumnVector[] vectors = new ColumnVector[fieldsLength];
+    if (useOffHeap) {
+      for (int i = 0; i < fieldsLength - constantColumnLength; i++) {
+        vectors[i] = new OffHeapColumnVector(capacity, fields[i].dataType());
+      }
+    } else {
+      for (int i = 0; i < fieldsLength - constantColumnLength; i++) {
+        vectors[i] = new OnHeapColumnVector(capacity, fields[i].dataType());
+      }
+    }
+    for (int i = fieldsLength - constantColumnLength; i < fieldsLength; i++) {
+      vectors[i] = new ConstantColumnVector(capacity, fields[i].dataType());
+    }
+    return vectors;
   }
 }

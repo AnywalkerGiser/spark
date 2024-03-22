@@ -20,6 +20,7 @@ package org.apache.spark.ml.regression
 import java.util.Locale
 
 import breeze.stats.{distributions => dist}
+import breeze.stats.distributions.Rand.FixedSeed.randBasis
 import org.apache.commons.lang3.StringUtils
 import org.apache.hadoop.fs.Path
 
@@ -679,7 +680,7 @@ object GeneralizedLinearRegression extends DefaultParamsReadable[GeneralizedLine
     }
   }
 
-  private[regression] object Tweedie{
+  private[regression] object Tweedie {
 
     /** Constant used in initialization and deviance to avoid numerical issues. */
     val delta: Double = 0.1
@@ -1076,7 +1077,7 @@ class GeneralizedLinearRegressionModel private[ml] (
       this.logWarning(s"$uid: GeneralizedLinearRegressionModel.transform() does nothing" +
         " because no output columns were set.")
     }
-    outputData.toDF
+    outputData.toDF()
   }
 
   /**
@@ -1417,7 +1418,7 @@ class GeneralizedLinearRegressionSummary private[regression] (
         case Row(label: Double, pred: Double, weight: Double) =>
           (label, pred, weight)
     }
-    family.aic(t, deviance, numInstances, weightSum) + 2 * rank
+    family.aic(t, deviance, numInstances.toDouble, weightSum) + 2 * rank
   }
 }
 

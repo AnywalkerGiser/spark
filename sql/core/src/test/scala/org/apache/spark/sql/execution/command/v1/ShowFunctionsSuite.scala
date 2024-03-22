@@ -19,7 +19,8 @@ package org.apache.spark.sql.execution.command.v1
 
 import java.util.Locale
 
-import org.apache.spark.sql.Row
+import test.org.apache.spark.sql.MyDoubleSum
+
 import org.apache.spark.sql.execution.command
 
 /**
@@ -27,81 +28,26 @@ import org.apache.spark.sql.execution.command
  * table catalogs. The tests that cannot run for all V1 catalogs are located in more
  * specific test suites:
  *
- *   - Temporary functions of V1 catalog:
- *     `org.apache.spark.sql.execution.command.v1.ShowTempFunctionsSuite`
- *   - Permanent functions of V1 catalog:
- *     `org.apache.spark.sql.hive.execution.command.ShowFunctionsSuite`
+ *   - V1 In-Memory catalog: `org.apache.spark.sql.execution.command.v1.ShowFunctionsSuite`
+ *   - V1 Hive External catalog: `org.apache.spark.sql.hive.execution.command.ShowFunctionsSuite`
  */
 trait ShowFunctionsSuiteBase extends command.ShowFunctionsSuiteBase
   with command.TestsV1AndV2Commands {
-
-  test("show a function") {
-    withNamespaceAndFun("ns", "iiilog") { (ns, f) =>
-      val totalFuns = sql(s"SHOW FUNCTIONS IN $ns").count()
-      createFunction(f)
-      assert(sql(s"SHOW FUNCTIONS IN $ns").count() - totalFuns === 1)
-      assert(!sql(s"SHOW FUNCTIONS IN $ns").filter("contains(function, 'iiilog')").isEmpty)
-    }
+  override protected def createFunction(name: String): Unit = {
+    sql(s"CREATE FUNCTION $name AS '${classOf[MyDoubleSum].getName}'")
   }
-
-  test("show a function in the USER name space") {
-    withNamespaceAndFun("ns", "logiii") { (ns, f) =>
-      assert(sql(s"SHOW USER FUNCTIONS IN $ns").count() === 0)
-      createFunction(f)
-      checkAnswer(sql(s"SHOW USER FUNCTIONS IN $ns"), Row(showFun("ns", "logiii")))
-    }
+  override protected def dropFunction(name: String): Unit = {
+    sql(s"DROP FUNCTION IF EXISTS $name")
   }
-
-  test("show functions in the SYSTEM name space") {
-    withNamespaceAndFun("ns", "date_addi") { (ns, f) =>
-      val systemFuns = sql(s"SHOW SYSTEM FUNCTIONS IN $ns").count()
-      assert(systemFuns > 0)
-      createFunction(f)
-      assert(sql(s"SHOW SYSTEM FUNCTIONS IN $ns").count() === systemFuns)
-    }
-  }
-
-  test("show functions among both user and system defined functions") {
-    withNamespaceAndFun("ns", "current_datei") { (ns, f) =>
-      val allFuns = sql(s"SHOW ALL FUNCTIONS IN $ns").collect()
-      assert(allFuns.nonEmpty)
-      createFunction(f)
-      checkAnswer(
-        sql(s"SHOW ALL FUNCTIONS IN $ns"),
-        allFuns :+ Row(showFun("ns", "current_datei")))
-    }
-  }
-
-  test("show functions matched to the wildcard pattern") {
-    val testFuns = Seq("crc32i", "crc16j", "date1900", "Date1")
-    withNamespaceAndFuns("ns", testFuns) { (ns, funs) =>
-      assert(sql(s"SHOW USER FUNCTIONS IN $ns").isEmpty)
-      funs.foreach(createFunction)
-      checkAnswer(
-        sql(s"SHOW USER FUNCTIONS IN $ns LIKE '*'"),
-        testFuns.map(testFun => Row(showFun("ns", testFun))))
-      checkAnswer(
-        sql(s"SHOW USER FUNCTIONS IN $ns LIKE '*rc*'"),
-        Seq("crc32i", "crc16j").map(testFun => Row(showFun("ns", testFun))))
-    }
+  override protected def qualifiedFunName(ns: String, name: String): String = {
+    // `SessionCatalog` lower-cases function names before creating.
+    super.qualifiedFunName(ns, name).toLowerCase(Locale.ROOT)
   }
 }
 
 /**
- * The class contains tests for the `SHOW FUNCTIONS` command to check temporary functions.
+ * The class contains tests for the `SHOW FUNCTIONS` command to check V1 In-Memory table catalog.
  */
-class ShowTempFunctionsSuite extends ShowFunctionsSuiteBase with CommandSuiteBase {
+class ShowFunctionsSuite extends ShowFunctionsSuiteBase with CommandSuiteBase {
   override def commandVersion: String = super[ShowFunctionsSuiteBase].commandVersion
-
-  override protected def createFunction(name: String): Unit = {
-    spark.udf.register(name, (arg1: Int, arg2: String) => arg2 + arg1)
-  }
-
-  override protected def dropFunction(name: String): Unit = {
-    spark.sessionState.catalog.dropTempFunction(name, false)
-  }
-
-  override protected def showFun(ns: String, name: String): String = {
-    s"$catalog.$ns.$name".toLowerCase(Locale.ROOT)
-  }
 }

@@ -17,11 +17,8 @@
 
 package org.apache.spark.sql.sources
 
-import org.scalatest.BeforeAndAfterAll
-
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.catalyst.analysis.SimpleAnalyzer
 import org.apache.spark.sql.catalyst.dsl.expressions._
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, Cast, Expression, Literal}
 import org.apache.spark.sql.catalyst.plans.SQLHelper
@@ -30,7 +27,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.SQLConf.StoreAssignmentPolicy
 import org.apache.spark.sql.types.{DataType, IntegerType, StructType}
 
-class DataSourceAnalysisSuite extends SparkFunSuite with BeforeAndAfterAll with SQLHelper {
+class DataSourceAnalysisSuite extends SparkFunSuite with SQLHelper {
 
   private var targetAttributes: Seq[Attribute] = _
   private var targetPartitionSchema: StructType = _
@@ -71,7 +68,7 @@ class DataSourceAnalysisSuite extends SparkFunSuite with BeforeAndAfterAll with 
           Cast(e, dt, Option(SQLConf.get.sessionLocalTimeZone))
       }
     }
-    val rule = DataSourceAnalysis(SimpleAnalyzer)
+    val rule = DataSourceAnalysis
     testRule(
       "convertStaticPartitions only handle INSERT having at least static partitions",
         caseSensitive) {

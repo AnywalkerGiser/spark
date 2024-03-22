@@ -23,9 +23,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import javax.annotation.concurrent.GuardedBy
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
+import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse
@@ -35,9 +35,11 @@ import org.apache.hadoop.yarn.client.api.AMRMClient.ContainerRequest
 import org.apache.hadoop.yarn.conf.YarnConfiguration
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkException}
+import org.apache.spark.deploy.ExecutorFailureTracker
 import org.apache.spark.deploy.yarn.ResourceRequestHelper._
 import org.apache.spark.deploy.yarn.YarnSparkHadoopUtil._
 import org.apache.spark.deploy.yarn.config._
+import org.apache.spark.executor.ExecutorExitCode
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
 import org.apache.spark.resource.ResourceProfile
@@ -89,6 +91,9 @@ private[yarn] class YarnAllocator(
   // completed.
   @GuardedBy("this")
   private val releasedContainers = collection.mutable.HashSet[ContainerId]()
+
+  @GuardedBy("this")
+  private val launchingExecutorContainerIds = collection.mutable.HashSet[ContainerId]()
 
   @GuardedBy("this")
   private val runningExecutorsPerResourceProfileId = new HashMap[Int, mutable.Set[String]]()
@@ -158,12 +163,14 @@ private[yarn] class YarnAllocator(
   private var executorIdCounter: Int =
     driverRef.askSync[Int](RetrieveLastAllocatedExecutorId)
 
-  private[spark] val failureTracker = new FailureTracker(sparkConf, clock)
+  private[spark] val failureTracker = new ExecutorFailureTracker(sparkConf, clock)
 
   private val allocatorNodeHealthTracker =
     new YarnAllocatorNodeHealthTracker(sparkConf, amClient, failureTracker)
 
   private val isPythonApp = sparkConf.get(IS_PYTHON_APP)
+
+  private val minMemoryOverhead = sparkConf.get(EXECUTOR_MIN_MEMORY_OVERHEAD)
 
   private val memoryOverheadFactor = sparkConf.get(EXECUTOR_MEMORY_OVERHEAD_FACTOR)
 
@@ -199,9 +206,11 @@ private[yarn] class YarnAllocator(
     }
   }
 
+  @volatile private var shutdown = false
+
   // The default profile is always present so we need to initialize the datastructures keyed by
   // ResourceProfile id to ensure its present if things start running before a request for
-  // executors could add it. This approach is easier then going and special casing everywhere.
+  // executors could add it. This approach is easier than going and special casing everywhere.
   private def initDefaultProfile(): Unit = synchronized {
     allocatedHostToContainersMapPerRPId(DEFAULT_RESOURCE_PROFILE_ID) =
       new HashMap[String, mutable.Set[ContainerId]]()
@@ -214,6 +223,8 @@ private[yarn] class YarnAllocator(
   }
 
   initDefaultProfile()
+
+  def setShutdown(shutdown: Boolean): Unit = this.shutdown = shutdown
 
   def getNumExecutorsRunning: Int = synchronized {
     runningExecutorsPerResourceProfileId.values.map(_.size).sum
@@ -298,14 +309,14 @@ private[yarn] class YarnAllocator(
 
   // if a ResourceProfile hasn't been seen yet, create the corresponding YARN Resource for it
   private def createYarnResourceForResourceProfile(rp: ResourceProfile): Unit = synchronized {
-    if (!rpIdToYarnResource.contains(rp.id)) {
+    if (!rpIdToYarnResource.containsKey(rp.id)) {
       // track the resource profile if not already there
       getOrUpdateRunningExecutorForRPId(rp.id)
       logInfo(s"Resource profile ${rp.id} doesn't exist, adding it")
 
       val resourcesWithDefaults =
         ResourceProfile.getResourcesForClusterManager(rp.id, rp.executorResources,
-          memoryOverheadFactor, sparkConf, isPythonApp, resourceNameMapping)
+          minMemoryOverhead, memoryOverheadFactor, sparkConf, isPythonApp, resourceNameMapping)
       val customSparkResources =
         resourcesWithDefaults.customResources.map { case (name, execReq) =>
           (name, execReq.amount.toString)
@@ -336,14 +347,16 @@ private[yarn] class YarnAllocator(
         val gpuResource = sparkConf.get(YARN_GPU_DEVICE)
         val fpgaResource = sparkConf.get(YARN_FPGA_DEVICE)
         getYarnResourcesAndAmounts(sparkConf, config.YARN_EXECUTOR_RESOURCE_TYPES_PREFIX) ++
-          customSparkResources.filterKeys { r =>
+          customSparkResources.filter { case (r, _) =>
             (r == gpuResource || r == fpgaResource)
           }
       } else {
         customSparkResources
       }
-      val resource =
-        Resource.newInstance(resourcesWithDefaults.totalMemMiB.toInt, resourcesWithDefaults.cores)
+
+      assert(resourcesWithDefaults.cores.nonEmpty)
+      val resource = Resource.newInstance(
+        resourcesWithDefaults.totalMemMiB.toInt, resourcesWithDefaults.cores.get)
       ResourceRequestHelper.setResourceRequests(customResources, resource)
       logDebug(s"Created resource capability: $resource")
       rpIdToYarnResource.putIfAbsent(rp.id, resource)
@@ -374,19 +387,28 @@ private[yarn] class YarnAllocator(
     this.numLocalityAwareTasksPerResourceProfileId = numLocalityAwareTasksPerResourceProfileId
     this.hostToLocalTaskCountPerResourceProfileId = hostToLocalTaskCountPerResourceProfileId
 
-    val res = resourceProfileToTotalExecs.map { case (rp, numExecs) =>
-      createYarnResourceForResourceProfile(rp)
-      if (numExecs != getOrUpdateTargetNumExecutorsForRPId(rp.id)) {
-        logInfo(s"Driver requested a total number of $numExecs executor(s) " +
-          s"for resource profile id: ${rp.id}.")
-        targetNumExecutorsPerResourceProfileId(rp.id) = numExecs
-        allocatorNodeHealthTracker.setSchedulerExcludedNodes(excludedNodes)
-        true
-      } else {
-        false
+    if (resourceProfileToTotalExecs.isEmpty) {
+      // Set target executor number to 0 to cancel pending allocate request.
+      targetNumExecutorsPerResourceProfileId.keys.foreach { rp =>
+        targetNumExecutorsPerResourceProfileId(rp) = 0
       }
+      allocatorNodeHealthTracker.setSchedulerExcludedNodes(excludedNodes)
+      true
+    } else {
+      val res = resourceProfileToTotalExecs.map { case (rp, numExecs) =>
+        createYarnResourceForResourceProfile(rp)
+        if (numExecs != getOrUpdateTargetNumExecutorsForRPId(rp.id)) {
+          logInfo(s"Driver requested a total number of $numExecs executor(s) " +
+            s"for resource profile id: ${rp.id}.")
+          targetNumExecutorsPerResourceProfileId(rp.id) = numExecs
+          allocatorNodeHealthTracker.setSchedulerExcludedNodes(excludedNodes)
+          true
+        } else {
+          false
+        }
+      }
+      res.exists(_ == true)
     }
-    res.exists(_ == true)
   }
 
   /**
@@ -451,11 +473,7 @@ private[yarn] class YarnAllocator(
     // resources on those nodes for earlier allocateResource calls, so notifying driver
     // to put those executors in decommissioning state
     allocateResponse.getUpdatedNodes.asScala.filter (node =>
-      // SPARK-39491: Hadoop 2.7 does not support `NodeState.DECOMMISSIONING`,
-      // there change to use string comparison instead for compilation.
-      // Should revert to `node.getNodeState == NodeState.DECOMMISSIONING` when
-      // Hadoop 2.7 is no longer supported.
-      node.getNodeState.toString.equals("DECOMMISSIONING") &&
+      node.getNodeState == NodeState.DECOMMISSIONING &&
         !decommissioningNodesCache.containsKey(getHostAddress(node)))
       .foreach { node =>
         val host = getHostAddress(node)
@@ -504,10 +522,9 @@ private[yarn] class YarnAllocator(
           var requestContainerMessage = s"Will request $missing executor container(s) for " +
             s" ResourceProfile Id: $rpId, each with " +
             s"${resource.getVirtualCores} core(s) and " +
-            s"${resource.getMemory} MB memory."
-          if (ResourceRequestHelper.isYarnResourceTypesAvailable() &&
-            ResourceRequestHelper.isYarnCustomResourcesNonEmpty(resource)) {
-            requestContainerMessage ++= s" with custom resources: " + resource.toString
+            s"${resource.getMemorySize} MB memory."
+          if (resource.getResources().nonEmpty) {
+            requestContainerMessage ++= s" with custom resources: $resource"
           }
           logInfo(requestContainerMessage)
         }
@@ -699,7 +716,7 @@ private[yarn] class YarnAllocator(
       containersToUse: ArrayBuffer[Container],
       remaining: ArrayBuffer[Container]): Unit = {
     // Match on the exact resource we requested so there shouldn't be a mismatch,
-    // we are relying on YARN to return a container with resources no less then we requested.
+    // we are relying on YARN to return a container with resources no less than we requested.
     // If we change this, or starting validating the container, be sure the logic covers SPARK-6050.
     val rpId = getResourceProfileIdFromPriority(allocatedContainer.getPriority)
     val resourceForRP = rpIdToYarnResource.get(rpId)
@@ -732,31 +749,23 @@ private[yarn] class YarnAllocator(
       val containerId = container.getId
       val executorId = executorIdCounter.toString
       val yarnResourceForRpId = rpIdToYarnResource.get(rpId)
-      assert(container.getResource.getMemory >= yarnResourceForRpId.getMemory)
+      assert(container.getResource.getMemorySize >= yarnResourceForRpId.getMemorySize)
       logInfo(s"Launching container $containerId on host $executorHostname " +
         s"for executor with ID $executorId for ResourceProfile Id $rpId")
-
-      def updateInternalState(): Unit = synchronized {
-        getOrUpdateRunningExecutorForRPId(rpId).add(executorId)
-        getOrUpdateNumExecutorsStartingForRPId(rpId).decrementAndGet()
-        executorIdToContainer(executorId) = container
-        containerIdToExecutorIdAndResourceProfileId(container.getId) = (executorId, rpId)
-
-        val localallocatedHostToContainersMap = getOrUpdateAllocatedHostToContainersMapForRPId(rpId)
-        val containerSet = localallocatedHostToContainersMap.getOrElseUpdate(executorHostname,
-          new HashSet[ContainerId])
-        containerSet += containerId
-        allocatedContainerToHostMap.put(containerId, executorHostname)
-      }
 
       val rp = rpIdToResourceProfile(rpId)
       val defaultResources = ResourceProfile.getDefaultProfileExecutorResources(sparkConf)
       val containerMem = rp.executorResources.get(ResourceProfile.MEMORY).
         map(_.amount).getOrElse(defaultResources.executorMemoryMiB).toInt
-      val containerCores = rp.getExecutorCores.getOrElse(defaultResources.cores)
+
+      assert(defaultResources.cores.nonEmpty)
+      val defaultCores = defaultResources.cores.get
+      val containerCores = rp.getExecutorCores.getOrElse(defaultCores)
+
       val rpRunningExecs = getOrUpdateRunningExecutorForRPId(rpId).size
       if (rpRunningExecs < getOrUpdateTargetNumExecutorsForRPId(rpId)) {
         getOrUpdateNumExecutorsStartingForRPId(rpId).incrementAndGet()
+        launchingExecutorContainerIds.add(containerId)
         if (launchContainers) {
           launcherPool.execute(() => {
             try {
@@ -774,10 +783,11 @@ private[yarn] class YarnAllocator(
                 localResources,
                 rp.id
               ).run()
-              updateInternalState()
+              updateInternalState(rpId, executorId, container)
             } catch {
               case e: Throwable =>
                 getOrUpdateNumExecutorsStartingForRPId(rpId).decrementAndGet()
+                launchingExecutorContainerIds.remove(containerId)
                 if (NonFatal(e)) {
                   logError(s"Failed to launch executor $executorId on container $containerId", e)
                   // Assigned container should be released immediately
@@ -790,7 +800,7 @@ private[yarn] class YarnAllocator(
           })
         } else {
           // For test only
-          updateInternalState()
+          updateInternalState(rpId, executorId, container)
         }
       } else {
         logInfo(("Skip launching executorRunnable as running executors count: %d " +
@@ -800,11 +810,31 @@ private[yarn] class YarnAllocator(
     }
   }
 
+  private def updateInternalState(rpId: Int, executorId: String,
+      container: Container): Unit = synchronized {
+    val containerId = container.getId
+    if (launchingExecutorContainerIds.contains(containerId)) {
+      getOrUpdateRunningExecutorForRPId(rpId).add(executorId)
+      executorIdToContainer(executorId) = container
+      containerIdToExecutorIdAndResourceProfileId(containerId) = (executorId, rpId)
+
+      val localallocatedHostToContainersMap = getOrUpdateAllocatedHostToContainersMapForRPId(rpId)
+      val executorHostname = container.getNodeId.getHost
+      val containerSet = localallocatedHostToContainersMap.getOrElseUpdate(executorHostname,
+        new HashSet[ContainerId])
+      containerSet += containerId
+      allocatedContainerToHostMap.put(containerId, executorHostname)
+      launchingExecutorContainerIds.remove(containerId)
+    }
+    getOrUpdateNumExecutorsStartingForRPId(rpId).decrementAndGet()
+  }
+
   // Visible for testing.
   private[yarn] def processCompletedContainers(
       completedContainers: Seq[ContainerStatus]): Unit = synchronized {
     for (completedContainer <- completedContainers) {
       val containerId = completedContainer.getContainerId
+      launchingExecutorContainerIds.remove(containerId)
       val (_, rpId) = containerIdToExecutorIdAndResourceProfileId.getOrElse(containerId,
         ("", DEFAULT_RESOURCE_PROFILE_ID))
       val alreadyReleased = releasedContainers.remove(containerId)
@@ -824,11 +854,10 @@ private[yarn] class YarnAllocator(
           onHostStr,
           completedContainer.getState,
           completedContainer.getExitStatus))
-        // Hadoop 2.2.X added a ContainerExitStatus we should switch to use
-        // there are some exit status' we shouldn't necessarily count against us, but for
-        // now I think its ok as none of the containers are expected to exit.
         val exitStatus = completedContainer.getExitStatus
         val (exitCausedByApp, containerExitReason) = exitStatus match {
+          case _ if shutdown =>
+            (false, s"Executor for container $containerId exited after Application shutdown.")
           case ContainerExitStatus.SUCCESS =>
             (false, s"Executor for container $containerId exited because of a YARN event (e.g., " +
               "preemption) and not because of an error in the running job.")
@@ -838,7 +867,7 @@ private[yarn] class YarnAllocator(
             // just as easily finish on any other executor. See SPARK-8167.
             (false, s"Container ${containerId}${onHostStr} was preempted.")
           // Should probably still count memory exceeded exit codes towards task failures
-          case VMEM_EXCEEDED_EXIT_CODE =>
+          case ContainerExitStatus.KILLED_EXCEEDED_VMEM =>
             val vmemExceededPattern = raw"$MEM_REGEX of $MEM_REGEX virtual memory used".r
             val diag = vmemExceededPattern.findFirstIn(completedContainer.getDiagnostics)
               .map(_.concat(".")).getOrElse("")
@@ -847,7 +876,7 @@ private[yarn] class YarnAllocator(
               s"${YarnConfiguration.NM_VMEM_PMEM_RATIO} or disabling " +
               s"${YarnConfiguration.NM_VMEM_CHECK_ENABLED} because of YARN-4714."
             (true, message)
-          case PMEM_EXCEEDED_EXIT_CODE =>
+          case ContainerExitStatus.KILLED_EXCEEDED_PMEM =>
             val pmemExceededPattern = raw"$MEM_REGEX of $MEM_REGEX physical memory used".r
             val diag = pmemExceededPattern.findFirstIn(completedContainer.getDiagnostics)
               .map(_.concat(".")).getOrElse("")
@@ -855,23 +884,26 @@ private[yarn] class YarnAllocator(
               s"$diag Consider boosting ${EXECUTOR_MEMORY_OVERHEAD.key}."
             (true, message)
           case other_exit_status =>
-            // SPARK-26269: follow YARN's behaviour(see https://github
-            // .com/apache/hadoop/blob/228156cfd1b474988bc4fedfbf7edddc87db41e3/had
-            // oop-yarn-project/hadoop-yarn/hadoop-yarn-common/src/main/java/org/ap
-            // ache/hadoop/yarn/util/Apps.java#L273 for details)
+            val exitStatus = completedContainer.getExitStatus
+            // SPARK-46920: Spark defines its own exit codes, which have overlap with
+            // exit codes defined by YARN, thus diagnostics reported by YARN may be
+            // misleading.
+            val sparkExitCodeReason = ExecutorExitCode.explainExitCode(exitStatus)
+            // SPARK-26269: follow YARN's behaviour, see details in
+            // org.apache.hadoop.yarn.util.Apps#shouldCountTowardsNodeBlacklisting
             if (NOT_APP_AND_SYSTEM_FAULT_EXIT_STATUS.contains(other_exit_status)) {
-              (false, s"Container marked as failed: $containerId$onHostStr" +
-                s". Exit status: ${completedContainer.getExitStatus}" +
-                s". Diagnostics: ${completedContainer.getDiagnostics}.")
+              (false, s"Container marked as failed: $containerId$onHostStr. " +
+                s"Exit status: $exitStatus. " +
+                s"Possible causes: $sparkExitCodeReason " +
+                s"Diagnostics: ${completedContainer.getDiagnostics}.")
             } else {
               // completed container from a bad node
               allocatorNodeHealthTracker.handleResourceAllocationFailure(hostOpt)
-              (true, s"Container from a bad node: $containerId$onHostStr" +
-                s". Exit status: ${completedContainer.getExitStatus}" +
-                s". Diagnostics: ${completedContainer.getDiagnostics}.")
+              (true, s"Container from a bad node: $containerId$onHostStr. " +
+                s"Exit status: $exitStatus. " +
+                s"Possible causes: $sparkExitCodeReason " +
+                s"Diagnostics: ${completedContainer.getDiagnostics}.")
             }
-
-
         }
         if (exitCausedByApp) {
           logWarning(containerExitReason)
@@ -996,8 +1028,6 @@ private[yarn] class YarnAllocator(
 
 private object YarnAllocator {
   val MEM_REGEX = "[0-9.]+ [KMG]B"
-  val VMEM_EXCEEDED_EXIT_CODE = -103
-  val PMEM_EXCEEDED_EXIT_CODE = -104
   val DECOMMISSIONING_NODES_CACHE_SIZE = 200
 
   val NOT_APP_AND_SYSTEM_FAULT_EXIT_STATUS = Set(

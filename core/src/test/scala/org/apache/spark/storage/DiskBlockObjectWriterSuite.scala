@@ -18,14 +18,12 @@ package org.apache.spark.storage
 
 import java.io.File
 
-import org.scalatest.BeforeAndAfterEach
-
-import org.apache.spark.{SparkConf, SparkFunSuite}
+import org.apache.spark.{SparkConf, SparkException, SparkFunSuite}
 import org.apache.spark.executor.ShuffleWriteMetrics
 import org.apache.spark.serializer.{JavaSerializer, SerializerManager}
 import org.apache.spark.util.Utils
 
-class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
+class DiskBlockObjectWriterSuite extends SparkFunSuite {
 
   var tempDir: File = _
 
@@ -98,7 +96,7 @@ class DiskBlockObjectWriterSuite extends SparkFunSuite with BeforeAndAfterEach {
 
     writer.open()
     writer.close()
-    intercept[IllegalStateException] {
+    intercept[SparkException] {
       writer.open()
     }
   }

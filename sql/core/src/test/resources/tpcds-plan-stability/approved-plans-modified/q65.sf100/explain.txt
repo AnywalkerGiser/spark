@@ -16,7 +16,7 @@ TakeOrderedAndProject (39)
       :        :        :              +- * BroadcastHashJoin Inner BuildRight (5)
       :        :        :                 :- * Filter (3)
       :        :        :                 :  +- * ColumnarToRow (2)
-      :        :        :                 :     +- Scan parquet default.store_sales (1)
+      :        :        :                 :     +- Scan parquet spark_catalog.default.store_sales (1)
       :        :        :                 +- ReusedExchange (4)
       :        :        +- BroadcastExchange (24)
       :        :           +- * Filter (23)
@@ -30,17 +30,17 @@ TakeOrderedAndProject (39)
       :        :                                   +- * BroadcastHashJoin Inner BuildRight (15)
       :        :                                      :- * Filter (13)
       :        :                                      :  +- * ColumnarToRow (12)
-      :        :                                      :     +- Scan parquet default.store_sales (11)
+      :        :                                      :     +- Scan parquet spark_catalog.default.store_sales (11)
       :        :                                      +- ReusedExchange (14)
       :        +- * Filter (30)
       :           +- * ColumnarToRow (29)
-      :              +- Scan parquet default.store (28)
+      :              +- Scan parquet spark_catalog.default.store (28)
       +- * Filter (36)
          +- * ColumnarToRow (35)
-            +- Scan parquet default.item (34)
+            +- Scan parquet spark_catalog.default.item (34)
 
 
-(1) Scan parquet default.store_sales
+(1) Scan parquet spark_catalog.default.store_sales
 Output [4]: [ss_item_sk#1, ss_store_sk#2, ss_sales_price#3, ss_sold_date_sk#4]
 Batched: true
 Location: InMemoryFileIndex []
@@ -61,6 +61,7 @@ Output [1]: [d_date_sk#6]
 (5) BroadcastHashJoin [codegen id : 2]
 Left keys [1]: [ss_sold_date_sk#4]
 Right keys [1]: [d_date_sk#6]
+Join type: Inner
 Join condition: None
 
 (6) Project [codegen id : 2]
@@ -89,7 +90,7 @@ Results [3]: [ss_store_sk#2, ss_item_sk#1, MakeDecimal(sum(UnscaledValue(ss_sale
 Input [3]: [ss_store_sk#2, ss_item_sk#1, revenue#10]
 Condition : isnotnull(revenue#10)
 
-(11) Scan parquet default.store_sales
+(11) Scan parquet spark_catalog.default.store_sales
 Output [4]: [ss_item_sk#11, ss_store_sk#12, ss_sales_price#13, ss_sold_date_sk#14]
 Batched: true
 Location: InMemoryFileIndex []
@@ -110,6 +111,7 @@ Output [1]: [d_date_sk#15]
 (15) BroadcastHashJoin [codegen id : 4]
 Left keys [1]: [ss_sold_date_sk#14]
 Right keys [1]: [d_date_sk#15]
+Join type: Inner
 Join condition: None
 
 (16) Project [codegen id : 4]
@@ -163,6 +165,7 @@ Arguments: HashedRelationBroadcastMode(List(cast(input[0, int, true] as bigint))
 (25) BroadcastHashJoin [codegen id : 7]
 Left keys [1]: [ss_store_sk#2]
 Right keys [1]: [ss_store_sk#12]
+Join type: Inner
 Join condition: (cast(revenue#10 as decimal(23,7)) <= (0.1 * ave#25))
 
 (26) Project [codegen id : 7]
@@ -173,7 +176,7 @@ Input [5]: [ss_store_sk#2, ss_item_sk#1, revenue#10, ss_store_sk#12, ave#25]
 Input [3]: [ss_store_sk#2, ss_item_sk#1, revenue#10]
 Arguments: HashedRelationBroadcastMode(List(cast(input[0, int, true] as bigint)),false), [plan_id=5]
 
-(28) Scan parquet default.store
+(28) Scan parquet spark_catalog.default.store
 Output [2]: [s_store_sk#26, s_store_name#27]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/store]
@@ -190,6 +193,7 @@ Condition : isnotnull(s_store_sk#26)
 (31) BroadcastHashJoin [codegen id : 8]
 Left keys [1]: [ss_store_sk#2]
 Right keys [1]: [s_store_sk#26]
+Join type: Inner
 Join condition: None
 
 (32) Project [codegen id : 8]
@@ -200,7 +204,7 @@ Input [5]: [ss_store_sk#2, ss_item_sk#1, revenue#10, s_store_sk#26, s_store_name
 Input [3]: [ss_item_sk#1, revenue#10, s_store_name#27]
 Arguments: HashedRelationBroadcastMode(List(cast(input[0, int, true] as bigint)),false), [plan_id=6]
 
-(34) Scan parquet default.item
+(34) Scan parquet spark_catalog.default.item
 Output [5]: [i_item_sk#28, i_item_desc#29, i_current_price#30, i_wholesale_cost#31, i_brand#32]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/item]
@@ -217,6 +221,7 @@ Condition : isnotnull(i_item_sk#28)
 (37) BroadcastHashJoin [codegen id : 9]
 Left keys [1]: [ss_item_sk#1]
 Right keys [1]: [i_item_sk#28]
+Join type: Inner
 Join condition: None
 
 (38) Project [codegen id : 9]
@@ -234,10 +239,10 @@ BroadcastExchange (44)
 +- * Project (43)
    +- * Filter (42)
       +- * ColumnarToRow (41)
-         +- Scan parquet default.date_dim (40)
+         +- Scan parquet spark_catalog.default.date_dim (40)
 
 
-(40) Scan parquet default.date_dim
+(40) Scan parquet spark_catalog.default.date_dim
 Output [2]: [d_date_sk#6, d_month_seq#33]
 Batched: true
 Location [not included in comparison]/{warehouse_dir}/date_dim]

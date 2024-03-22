@@ -4,8 +4,17 @@ SELECT regexp_extract('1a 2b 14m', '\\d+')
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-Regex group count is 0, but the specified group index is 1
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract`",
+    "groupCount" : "0",
+    "groupIndex" : "1",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -21,8 +30,17 @@ SELECT regexp_extract('1a 2b 14m', '\\d+', 1)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-Regex group count is 0, but the specified group index is 1
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract`",
+    "groupCount" : "0",
+    "groupIndex" : "1",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -30,8 +48,17 @@ SELECT regexp_extract('1a 2b 14m', '\\d+', 2)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-Regex group count is 0, but the specified group index is 2
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract`",
+    "groupCount" : "0",
+    "groupIndex" : "2",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -39,8 +66,17 @@ SELECT regexp_extract('1a 2b 14m', '\\d+', -1)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-The specified group index cannot be less than zero
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract`",
+    "groupCount" : "0",
+    "groupIndex" : "-1",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -96,8 +132,17 @@ SELECT regexp_extract('1a 2b 14m', '(\\d+)([a-z]+)', 3)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-Regex group count is 2, but the specified group index is 3
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract`",
+    "groupCount" : "2",
+    "groupIndex" : "3",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -105,8 +150,17 @@ SELECT regexp_extract('1a 2b 14m', '(\\d+)([a-z]+)', -1)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-The specified group index cannot be less than zero
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract`",
+    "groupCount" : "2",
+    "groupIndex" : "-1",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -126,12 +180,38 @@ struct<regexp_extract(a b m, (\d+)?([a-z]+), 1):string>
 
 
 -- !query
+SELECT regexp_extract('1a 2b 14m', '(?l)')
+-- !query schema
+struct<>
+-- !query output
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.PATTERN",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract`",
+    "parameter" : "`regexp`",
+    "value" : "'(?l)'"
+  }
+}
+
+
+-- !query
 SELECT regexp_extract_all('1a 2b 14m', '\\d+')
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-Regex group count is 0, but the specified group index is 1
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract_all`",
+    "groupCount" : "0",
+    "groupIndex" : "1",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -147,8 +227,17 @@ SELECT regexp_extract_all('1a 2b 14m', '\\d+', 1)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-Regex group count is 0, but the specified group index is 1
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract_all`",
+    "groupCount" : "0",
+    "groupIndex" : "1",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -156,8 +245,17 @@ SELECT regexp_extract_all('1a 2b 14m', '\\d+', 2)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-Regex group count is 0, but the specified group index is 2
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract_all`",
+    "groupCount" : "0",
+    "groupIndex" : "2",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -165,8 +263,17 @@ SELECT regexp_extract_all('1a 2b 14m', '\\d+', -1)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-The specified group index cannot be less than zero
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract_all`",
+    "groupCount" : "0",
+    "groupIndex" : "-1",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -222,8 +329,17 @@ SELECT regexp_extract_all('1a 2b 14m', '(\\d+)([a-z]+)', 3)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-Regex group count is 2, but the specified group index is 3
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract_all`",
+    "groupCount" : "2",
+    "groupIndex" : "3",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -231,8 +347,17 @@ SELECT regexp_extract_all('1a 2b 14m', '(\\d+)([a-z]+)', -1)
 -- !query schema
 struct<>
 -- !query output
-java.lang.IllegalArgumentException
-The specified group index cannot be less than zero
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract_all`",
+    "groupCount" : "2",
+    "groupIndex" : "-1",
+    "parameter" : "`idx`"
+  }
+}
 
 
 -- !query
@@ -252,6 +377,23 @@ struct<regexp_extract_all(a 2b 14m, (\d+)?([a-z]+), 1):array<string>>
 
 
 -- !query
+SELECT regexp_extract_all('abc', col0, 1) FROM VALUES('], [') AS t(col0)
+-- !query schema
+struct<>
+-- !query output
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.PATTERN",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_extract_all`",
+    "parameter" : "`regexp`",
+    "value" : "'], ['"
+  }
+}
+
+
+-- !query
 SELECT regexp_replace('healthy, wealthy, and wise', '\\w+thy', 'something')
 -- !query schema
 struct<regexp_replace(healthy, wealthy, and wise, \w+thy, something, 1):string>
@@ -264,8 +406,24 @@ SELECT regexp_replace('healthy, wealthy, and wise', '\\w+thy', 'something', -2)
 -- !query schema
 struct<>
 -- !query output
-org.apache.spark.sql.AnalysisException
-cannot resolve 'regexp_replace('healthy, wealthy, and wise', '\\w+thy', 'something', -2)' due to data type mismatch: Position expression must be positive, but got: -2; line 1 pos 7
+org.apache.spark.sql.catalyst.ExtendedAnalysisException
+{
+  "errorClass" : "DATATYPE_MISMATCH.VALUE_OUT_OF_RANGE",
+  "sqlState" : "42K09",
+  "messageParameters" : {
+    "currentValue" : "-2",
+    "exprName" : "position",
+    "sqlExpr" : "\"regexp_replace(healthy, wealthy, and wise, \\w+thy, something, -2)\"",
+    "valueRange" : "(0, 2147483647]"
+  },
+  "queryContext" : [ {
+    "objectType" : "",
+    "objectName" : "",
+    "startIndex" : 8,
+    "stopIndex" : 79,
+    "fragment" : "regexp_replace('healthy, wealthy, and wise', '\\\\w+thy', 'something', -2)"
+  } ]
+}
 
 
 -- !query
@@ -273,8 +431,24 @@ SELECT regexp_replace('healthy, wealthy, and wise', '\\w+thy', 'something', 0)
 -- !query schema
 struct<>
 -- !query output
-org.apache.spark.sql.AnalysisException
-cannot resolve 'regexp_replace('healthy, wealthy, and wise', '\\w+thy', 'something', 0)' due to data type mismatch: Position expression must be positive, but got: 0; line 1 pos 7
+org.apache.spark.sql.catalyst.ExtendedAnalysisException
+{
+  "errorClass" : "DATATYPE_MISMATCH.VALUE_OUT_OF_RANGE",
+  "sqlState" : "42K09",
+  "messageParameters" : {
+    "currentValue" : "0",
+    "exprName" : "position",
+    "sqlExpr" : "\"regexp_replace(healthy, wealthy, and wise, \\w+thy, something, 0)\"",
+    "valueRange" : "(0, 2147483647]"
+  },
+  "queryContext" : [ {
+    "objectType" : "",
+    "objectName" : "",
+    "startIndex" : 8,
+    "stopIndex" : 78,
+    "fragment" : "regexp_replace('healthy, wealthy, and wise', '\\\\w+thy', 'something', 0)"
+  } ]
+}
 
 
 -- !query
@@ -435,3 +609,124 @@ SELECT regexp_count('abc', null)
 struct<regexp_count(abc, NULL):int>
 -- !query output
 NULL
+
+
+-- !query
+SELECT regexp_substr('1a 2b 14m', '\\d+')
+-- !query schema
+struct<regexp_substr(1a 2b 14m, \d+):string>
+-- !query output
+1
+
+
+-- !query
+SELECT regexp_substr('1a 2b 14m', '\\d+ ')
+-- !query schema
+struct<regexp_substr(1a 2b 14m, \d+ ):string>
+-- !query output
+NULL
+
+
+-- !query
+SELECT regexp_substr('1a 2b 14m', '\\d+(a|b|m)')
+-- !query schema
+struct<regexp_substr(1a 2b 14m, \d+(a|b|m)):string>
+-- !query output
+1a
+
+
+-- !query
+SELECT regexp_substr('1a 2b 14m', '\\d{2}(a|b|m)')
+-- !query schema
+struct<regexp_substr(1a 2b 14m, \d{2}(a|b|m)):string>
+-- !query output
+14m
+
+
+-- !query
+SELECT regexp_substr('1a 2b 14m', '')
+-- !query schema
+struct<regexp_substr(1a 2b 14m, ):string>
+-- !query output
+NULL
+
+
+-- !query
+SELECT regexp_substr('Spark', null)
+-- !query schema
+struct<regexp_substr(Spark, NULL):string>
+-- !query output
+NULL
+
+
+-- !query
+SELECT regexp_substr(null, '.*')
+-- !query schema
+struct<regexp_substr(NULL, .*):string>
+-- !query output
+NULL
+
+
+-- !query
+SELECT regexp_instr('abc', 'b')
+-- !query schema
+struct<regexp_instr(abc, b, 0):int>
+-- !query output
+2
+
+
+-- !query
+SELECT regexp_instr('abc', 'x')
+-- !query schema
+struct<regexp_instr(abc, x, 0):int>
+-- !query output
+0
+
+
+-- !query
+SELECT regexp_instr('ABC', '(?-i)b')
+-- !query schema
+struct<regexp_instr(ABC, (?-i)b, 0):int>
+-- !query output
+0
+
+
+-- !query
+SELECT regexp_instr('1a 2b 14m', '\\d{2}(a|b|m)')
+-- !query schema
+struct<regexp_instr(1a 2b 14m, \d{2}(a|b|m), 0):int>
+-- !query output
+7
+
+
+-- !query
+SELECT regexp_instr('abc', null)
+-- !query schema
+struct<regexp_instr(abc, NULL, 0):int>
+-- !query output
+NULL
+
+
+-- !query
+SELECT regexp_instr(null, 'b')
+-- !query schema
+struct<regexp_instr(NULL, b, 0):int>
+-- !query output
+NULL
+
+
+-- !query
+SELECT regexp_instr('abc', col0, 1) FROM VALUES(') ?') AS t(col0)
+-- !query schema
+struct<>
+-- !query output
+org.apache.spark.SparkRuntimeException
+{
+  "errorClass" : "INVALID_PARAMETER_VALUE.PATTERN",
+  "sqlState" : "22023",
+  "messageParameters" : {
+    "functionName" : "`regexp_instr`",
+    "parameter" : "`regexp`",
+    "value" : "') ?'"
+  }
+}

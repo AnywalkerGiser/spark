@@ -23,16 +23,16 @@ Spark SQL provides `spark.read().csv("file_name")` to read a file or directory o
 
 <div class="codetabs">
 
+<div data-lang="python"  markdown="1">
+{% include_example csv_dataset python/sql/datasource.py %}
+</div>
+
 <div data-lang="scala"  markdown="1">
 {% include_example csv_dataset scala/org/apache/spark/examples/sql/SQLDataSourceExample.scala %}
 </div>
 
 <div data-lang="java"  markdown="1">
 {% include_example csv_dataset java/org/apache/spark/examples/sql/JavaSQLDataSourceExample.java %}
-</div>
-
-<div data-lang="python"  markdown="1">
-{% include_example csv_dataset python/sql/datasource.py %}
 </div>
 
 </div>
@@ -52,8 +52,8 @@ Data source options of CSV can be set via:
 * `OPTIONS` clause at [CREATE TABLE USING DATA_SOURCE](sql-ref-syntax-ddl-create-table-datasource.html)
 
 
-<table class="table">
-  <tr><th><b>Property Name</b></th><th><b>Default</b></th><th><b>Meaning</b></th><th><b>Scope</b></th></tr>
+<table>
+  <thead><tr><th><b>Property Name</b></th><th><b>Default</b></th><th><b>Meaning</b></th><th><b>Scope</b></th></tr></thead>
   <tr>
     <td><code>sep</code></td>
     <td>,</td>
@@ -106,6 +106,12 @@ Data source options of CSV can be set via:
     <td><code>inferSchema</code></td>
     <td>false</td>
     <td>Infers the input schema automatically from data. It requires one extra pass over the data. CSV built-in functions ignore this option.</td>
+    <td>read</td>
+  </tr>
+  <tr>
+    <td><code>preferDate</code></td>
+    <td>true</td>
+    <td>During schema inference (<code>inferSchema</code>), attempts to infer string columns that contain dates as <code>Date</code> if the values satisfy the <code>dateFormat</code> option or default date format. For columns that contain a mixture of dates and timestamps, try inferring them as <code>TimestampType</code> if timestamp format not specified, otherwise infer them as <code>StringType</code>.</td>
     <td>read</td>
   </tr>
   <tr>
@@ -169,6 +175,12 @@ Data source options of CSV can be set via:
     <td>read/write</td>
   </tr>
   <tr>
+    <td><code>enableDateTimeParsingFallback</code></td>
+    <td>Enabled if the time parser policy has legacy settings or if no custom date or timestamp pattern was provided.</td>
+    <td>Allows falling back to the backward compatible (Spark 1.x and 2.0) behavior of parsing dates and timestamps if values do not match the set patterns.</td>
+    <td>read</td>
+  </tr>
+  <tr>
     <td><code>maxColumns</code></td>
     <td>20480</td>
     <td>Defines a hard limit of how many columns a record can have.</td>
@@ -201,7 +213,7 @@ Data source options of CSV can be set via:
   <tr>
     <td><code>multiLine</code></td>
     <td>false</td>
-    <td>Parse one record, which may span multiple lines, per file. CSV built-in functions ignore this option.</td>
+    <td>Allows a row to span multiple lines, by parsing line breaks within quoted values as part of the value itself. CSV built-in functions ignore this option.</td>
     <td>read</td>
   </tr>
   <tr>
