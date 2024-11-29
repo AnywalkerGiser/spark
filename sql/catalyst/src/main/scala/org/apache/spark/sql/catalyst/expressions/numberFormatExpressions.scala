@@ -26,11 +26,14 @@ import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, CodeGe
 import org.apache.spark.sql.catalyst.expressions.codegen.Block.BlockHelper
 import org.apache.spark.sql.catalyst.util.ToNumberParser
 import org.apache.spark.sql.errors.QueryCompilationErrors
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.types.StringTypeWithCollation
 import org.apache.spark.sql.types.{AbstractDataType, BinaryType, DataType, DatetimeType, Decimal, DecimalType, StringType}
 import org.apache.spark.unsafe.types.UTF8String
 
 abstract class ToNumberBase(left: Expression, right: Expression, errorOnFail: Boolean)
-  extends BinaryExpression with Serializable with ImplicitCastInputTypes with NullIntolerant {
+  extends BinaryExpression with Serializable with ImplicitCastInputTypes {
+  override def nullIntolerant: Boolean = true
 
   private lazy val numberFormatter = {
     val value = right.eval()
@@ -47,7 +50,8 @@ abstract class ToNumberBase(left: Expression, right: Expression, errorOnFail: Bo
     DecimalType.USER_DEFAULT
   }
 
-  override def inputTypes: Seq[DataType] = Seq(StringType, StringType)
+  override def inputTypes: Seq[AbstractDataType] =
+    Seq(StringTypeWithCollation, StringTypeWithCollation)
 
   override def checkInputDataTypes(): TypeCheckResult = {
     val inputTypeCheck = super.checkInputDataTypes()
@@ -87,6 +91,7 @@ abstract class ToNumberBase(left: Expression, right: Expression, errorOnFail: Bo
         |${CodeGenerator.javaType(dataType)} ${ev.value} = ${CodeGenerator.defaultValue(dataType)};
         |if (!${ev.isNull}) {
         |  ${ev.value} = $builder.parse(${eval.value});
+        |  ${ev.isNull} = ${ev.isNull} || (${ev.value} == null);
         |}
       """.stripMargin)
   }
@@ -246,8 +251,9 @@ object ToCharacterBuilder extends ExpressionBuilder {
       inputExpr.dataType match {
         case _: DatetimeType => DateFormatClass(inputExpr, format)
         case _: BinaryType =>
-          if (!(format.dataType == StringType && format.foldable)) {
-            throw QueryCompilationErrors.nonFoldableArgumentError(funcName, "format", StringType)
+          if (!(format.dataType.isInstanceOf[StringType] && format.foldable)) {
+            throw QueryCompilationErrors.nonFoldableArgumentError(funcName, "format",
+              format.dataType)
           }
           val fmt = format.eval()
           if (fmt == null) {
@@ -268,7 +274,9 @@ object ToCharacterBuilder extends ExpressionBuilder {
 }
 
 case class ToCharacter(left: Expression, right: Expression)
-  extends BinaryExpression with ImplicitCastInputTypes with NullIntolerant {
+  extends BinaryExpression with ImplicitCastInputTypes {
+  override def nullIntolerant: Boolean = true
+
   private lazy val numberFormatter = {
     val value = right.eval()
     if (value != null) {
@@ -278,8 +286,9 @@ case class ToCharacter(left: Expression, right: Expression)
     }
   }
 
-  override def dataType: DataType = StringType
-  override def inputTypes: Seq[AbstractDataType] = Seq(DecimalType, StringType)
+  override def dataType: DataType = SQLConf.get.defaultStringType
+  override def inputTypes: Seq[AbstractDataType] =
+    Seq(DecimalType, StringTypeWithCollation)
   override def checkInputDataTypes(): TypeCheckResult = {
     val inputTypeCheck = super.checkInputDataTypes()
     if (inputTypeCheck.isSuccess) {

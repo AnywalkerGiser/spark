@@ -18,6 +18,7 @@ import unittest
 
 from pyspark.sql import Row
 from pyspark.sql import functions as sf
+from pyspark.errors import AnalysisException
 from pyspark.testing.sqlutils import (
     ReusedSQLTestCase,
     have_pandas,
@@ -25,7 +26,7 @@ from pyspark.testing.sqlutils import (
     pandas_requirement_message,
     pyarrow_requirement_message,
 )
-from pyspark.testing import assertDataFrameEqual, assertSchemaEqual
+from pyspark.testing import assertDataFrameEqual
 
 
 class GroupTestsMixin:
@@ -91,30 +92,25 @@ class GroupTestsMixin:
             # basic case
             df1 = spark.sql("select a, sum(b) from v group by 1;")
             df2 = df.groupBy(1).agg(sf.sum("b"))
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             # constant case
             df1 = spark.sql("select 1, 2, sum(b) from v group by 1, 2;")
             df2 = df.select(sf.lit(1), sf.lit(2), "b").groupBy(1, 2).agg(sf.sum("b"))
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             # duplicate group by column
             df1 = spark.sql("select a, 1, sum(b) from v group by a, 1;")
             df2 = df.select("a", sf.lit(1), "b").groupBy("a", 2).agg(sf.sum("b"))
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             df1 = spark.sql("select a, 1, sum(b) from v group by 1, 2;")
             df2 = df.select("a", sf.lit(1), "b").groupBy(1, 2).agg(sf.sum("b"))
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             # group by a non-aggregate expression's ordinal
             df1 = spark.sql("select a, b + 2, count(2) from v group by a, 2;")
             df2 = df.select("a", df.b + 2).groupBy(1, 2).agg(sf.count(sf.lit(2)))
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             # negative cases: ordinal out of range
@@ -151,28 +147,23 @@ class GroupTestsMixin:
 
             df1 = spark.sql("select * from v order by 1 desc;")
             df2 = df.orderBy(-1)
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             df1 = spark.sql("select * from v order by 1 desc, b desc;")
             df2 = df.orderBy(-1, df.b.desc())
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             df1 = spark.sql("select * from v order by 1 desc, 2 desc;")
             df2 = df.orderBy(-1, -2)
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             # groupby ordinal with orderby ordinal
             df1 = spark.sql("select a, 1, sum(b) from v group by 1, 2 order by 1;")
             df2 = df.select("a", sf.lit(1), "b").groupBy(1, 2).agg(sf.sum("b")).sort(1)
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             df1 = spark.sql("select a, 1, sum(b) from v group by 1, 2 order by 3, 1;")
             df2 = df.select("a", sf.lit(1), "b").groupBy(1, 2).agg(sf.sum("b")).sort(3, 1)
-            assertSchemaEqual(df1.schema, df2.schema)
             assertDataFrameEqual(df1, df2)
 
             # negative cases: ordinal out of range
@@ -184,6 +175,10 @@ class GroupTestsMixin:
 
             with self.assertRaises(IndexError):
                 df.orderBy(-3)
+
+        def test_pivot_exceed_max_values(self):
+            with self.assertRaises(AnalysisException):
+                spark.range(100001).groupBy(sf.lit(1)).pivot("id").count().show()
 
 
 class GroupTests(GroupTestsMixin, ReusedSQLTestCase):

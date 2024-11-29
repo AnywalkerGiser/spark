@@ -306,13 +306,13 @@ class SQLQueryTestSuite extends QueryTest with SharedSparkSession with SQLHelper
         localSparkSession.udf.register("vol", (s: String) => s)
         localSparkSession.conf.set(SQLConf.ANSI_ENABLED.key, true)
         localSparkSession.conf.set(SQLConf.LEGACY_INTERVAL_ENABLED.key, true)
-      case _: SQLQueryTestSuite#AnsiTest =>
-        localSparkSession.conf.set(SQLConf.ANSI_ENABLED.key, true)
+      case _: SQLQueryTestSuite#NonAnsiTest =>
+        localSparkSession.conf.set(SQLConf.ANSI_ENABLED.key, false)
       case _: SQLQueryTestSuite#TimestampNTZTest =>
         localSparkSession.conf.set(SQLConf.TIMESTAMP_TYPE.key,
           TimestampTypes.TIMESTAMP_NTZ.toString)
       case _ =>
-        localSparkSession.conf.set(SQLConf.ANSI_ENABLED.key, false)
+        localSparkSession.conf.set(SQLConf.ANSI_ENABLED.key, true)
     }
 
     if (sparkConfigSet.nonEmpty) {
@@ -445,8 +445,8 @@ class SQLQueryTestSuite extends QueryTest with SharedSparkSession with SQLHelper
         }
       } else if (file.getAbsolutePath.startsWith(s"$inputFilePath${File.separator}postgreSQL")) {
         PgSQLTestCase(testCaseName, absPath, resultFile) :: Nil
-      } else if (file.getAbsolutePath.startsWith(s"$inputFilePath${File.separator}ansi")) {
-        AnsiTestCase(testCaseName, absPath, resultFile) :: Nil
+      } else if (file.getAbsolutePath.startsWith(s"$inputFilePath${File.separator}nonansi")) {
+        NonAnsiTestCase(testCaseName, absPath, resultFile) :: Nil
       } else if (file.getAbsolutePath.startsWith(s"$inputFilePath${File.separator}timestampNTZ")) {
         TimestampNTZTestCase(testCaseName, absPath, resultFile) :: Nil
       } else if (file.getAbsolutePath.startsWith(s"$inputFilePath${File.separator}cte.sql")) {
@@ -703,9 +703,9 @@ class SQLQueryTestSuite extends QueryTest with SharedSparkSession with SQLHelper
   }
 
   test("Test logic for determining whether a query is semantically sorted") {
-    withTable("t1", "t2") {
-      spark.sql("CREATE TABLE t1(a int, b int) USING parquet")
-      spark.sql("CREATE TABLE t2(a int, b int) USING parquet")
+    withTempView("t1", "t2") {
+      spark.sql("CREATE TEMP VIEW t1 AS SELECT * FROM VALUES (1, 1) AS t1(a, b)")
+      spark.sql("CREATE TEMP VIEW t2 AS SELECT * FROM VALUES (1, 2) AS t2(a, b)")
 
       val unsortedSelectQuery = "select * from t1"
       val sortedSelectQuery = "select * from t1 order by a, b"

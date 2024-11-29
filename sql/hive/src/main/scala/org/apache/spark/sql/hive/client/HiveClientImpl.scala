@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.hive.client
 
-import java.io.PrintStream
+import java.io.{OutputStream, PrintStream}
 import java.lang.{Iterable => JIterable}
 import java.lang.reflect.InvocationTargetException
 import java.nio.charset.StandardCharsets.UTF_8
@@ -28,11 +28,11 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
+import org.apache.commons.lang3.exception.ExceptionUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.hive.common.StatsSetupConst
 import org.apache.hadoop.hive.conf.HiveConf
-import org.apache.hadoop.hive.conf.HiveConf.ConfVars
 import org.apache.hadoop.hive.metastore.{IMetaStoreClient, TableType => HiveTableType}
 import org.apache.hadoop.hive.metastore.api.{Database => HiveDatabase, Table => MetaStoreApiTable, _}
 import org.apache.hadoop.hive.ql.Driver
@@ -45,9 +45,10 @@ import org.apache.hadoop.hive.serde2.MetadataTypedColumnsetSerDe
 import org.apache.hadoop.hive.serde2.`lazy`.LazySimpleSerDe
 import org.apache.hadoop.security.UserGroupInformation
 
-import org.apache.spark.{SparkConf, SparkException}
+import org.apache.spark.{SparkConf, SparkException, SparkThrowable}
 import org.apache.spark.deploy.SparkHadoopUtil.SOURCE_SPARK
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, LogKeys, MDC}
+import org.apache.spark.internal.LogKeys._
 import org.apache.spark.metrics.source.HiveCatalogMetrics
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.{DatabaseAlreadyExistsException, NoSuchDatabaseException, NoSuchPartitionException, NoSuchPartitionsException, NoSuchTableException, PartitionsAlreadyExistException}
@@ -121,6 +122,7 @@ private[hive] class HiveClientImpl(
     case hive.v2_3 => new Shim_v2_3()
     case hive.v3_0 => new Shim_v3_0()
     case hive.v3_1 => new Shim_v3_1()
+    case hive.v4_0 => new Shim_v4_0()
   }
 
   // Create an internal session state for this HiveClientImpl.
@@ -150,7 +152,7 @@ private[hive] class HiveClientImpl(
         // hive.metastore.warehouse.dir is determined in SharedState after the CliSessionState
         // instance constructed, we need to follow that change here.
         warehouseDir.foreach { dir =>
-          ret.getConf.setVar(ConfVars.METASTOREWAREHOUSE, dir)
+          ret.getConf.setVar(HiveConf.getConfVars("hive.metastore.warehouse.dir"), dir)
         }
         ret
       } else {
@@ -161,8 +163,9 @@ private[hive] class HiveClientImpl(
 
   // Log the default warehouse location.
   logInfo(
-    s"Warehouse location for Hive client " +
-      s"(version ${version.fullVersion}) is ${conf.getVar(ConfVars.METASTOREWAREHOUSE)}")
+    log"Warehouse location for Hive client (version " +
+      log"${MDC(HIVE_CLIENT_VERSION, version.fullVersion)}) is " +
+    log"${MDC(PATH, conf.getVar(HiveConf.getConfVars("hive.metastore.warehouse.dir")))}")
 
   private def newState(): SessionState = {
     val hiveConf = newHiveConf(sparkConf, hadoopConf, extraConfig, Some(initClassLoader))
@@ -176,8 +179,10 @@ private[hive] class HiveClientImpl(
     // got changed. We reset it to clientLoader.ClassLoader here.
     state.getConf.setClassLoader(clientLoader.classLoader)
     shim.setCurrentSessionState(state)
-    state.out = new PrintStream(outputBuffer, true, UTF_8.name())
-    state.err = new PrintStream(outputBuffer, true, UTF_8.name())
+    val clz = state.getClass.getField("out").getType.asInstanceOf[Class[_ <: PrintStream]]
+    val ctor = clz.getConstructor(classOf[OutputStream], classOf[Boolean], classOf[String])
+    state.getClass.getField("out").set(state, ctor.newInstance(outputBuffer, true, UTF_8.name()))
+    state.getClass.getField("err").set(state, ctor.newInstance(outputBuffer, true, UTF_8.name()))
     state
   }
 
@@ -192,8 +197,8 @@ private[hive] class HiveClientImpl(
     // bin/spark-shell, bin/spark-sql and sbin/start-thriftserver.sh to automatically create the
     // Derby Metastore when running Spark in the non-production environment.
     val isEmbeddedMetaStore = {
-      val msUri = hiveConf.getVar(ConfVars.METASTOREURIS)
-      val msConnUrl = hiveConf.getVar(ConfVars.METASTORECONNECTURLKEY)
+      val msUri = hiveConf.getVar(HiveConf.getConfVars("hive.metastore.uris"))
+      val msConnUrl = hiveConf.getVar(HiveConf.getConfVars("javax.jdo.option.ConnectionURL"))
       (msUri == null || msUri.trim().isEmpty) &&
         (msConnUrl != null && msConnUrl.startsWith("jdbc:derby"))
     }
@@ -211,7 +216,7 @@ private[hive] class HiveClientImpl(
   }
 
   // We use hive's conf for compatibility.
-  private val retryLimit = conf.getIntVar(HiveConf.ConfVars.METASTORETHRIFTFAILURERETRIES)
+  private val retryLimit = conf.getIntVar(HiveConf.getConfVars("hive.metastore.failure.retries"))
   private val retryDelayMillis = shim.getMetastoreClientConnectRetryDelayMillis(conf)
 
   /**
@@ -230,8 +235,8 @@ private[hive] class HiveClientImpl(
         case e: Exception if causedByThrift(e) =>
           caughtException = e
           logWarning(
-            "HiveClient got thrift exception, destroying client and retrying " +
-              s"(${retryLimit - numTries} tries remaining)", e)
+            log"HiveClient got thrift exception, destroying client and retrying " +
+              log"${MDC(NUM_RETRY, numTries)} times", e)
           clientLoader.cachedHive = null
           Thread.sleep(retryDelayMillis)
       }
@@ -306,15 +311,27 @@ private[hive] class HiveClientImpl(
   }
 
   def setOut(stream: PrintStream): Unit = withHiveState {
-    state.out = stream
+    val ctor = state.getClass.getField("out")
+      .getType
+      .asInstanceOf[Class[_ <: PrintStream]]
+      .getConstructor(classOf[OutputStream])
+    state.getClass.getField("out").set(state, ctor.newInstance(stream))
   }
 
   def setInfo(stream: PrintStream): Unit = withHiveState {
-    state.info = stream
+    val ctor = state.getClass.getField("info")
+      .getType
+      .asInstanceOf[Class[_ <: PrintStream]]
+      .getConstructor(classOf[OutputStream])
+    state.getClass.getField("info").set(state, ctor.newInstance(stream))
   }
 
   def setError(stream: PrintStream): Unit = withHiveState {
-    state.err = stream
+    val ctor = state.getClass.getField("err")
+      .getType
+      .asInstanceOf[Class[_ <: PrintStream]]
+      .getConstructor(classOf[OutputStream])
+    state.getClass.getField("err").set(state, ctor.newInstance(stream))
   }
 
   private def setCurrentDatabaseRaw(db: String): Unit = {
@@ -628,21 +645,22 @@ private[hive] class HiveClientImpl(
   }
 
   override def createPartitions(
-      db: String,
-      table: String,
+      table: CatalogTable,
       parts: Seq[CatalogTablePartition],
       ignoreIfExists: Boolean): Unit = withHiveState {
     def replaceExistException(e: Throwable): Unit = e match {
       case _: HiveException if e.getCause.isInstanceOf[AlreadyExistsException] =>
-        val hiveTable = client.getTable(db, table)
+        val db = table.identifier.database.getOrElse(state.getCurrentDatabase)
+        val tableName = table.identifier.table
+        val hiveTable = client.getTable(db, tableName)
         val existingParts = parts.filter { p =>
           shim.getPartitions(client, hiveTable, p.spec.asJava).nonEmpty
         }
-        throw new PartitionsAlreadyExistException(db, table, existingParts.map(_.spec))
+        throw new PartitionsAlreadyExistException(db, tableName, existingParts.map(_.spec))
       case _ => throw e
     }
     try {
-      shim.createPartitions(client, db, table, parts, ignoreIfExists)
+      shim.createPartitions(client, toHiveTable(table), parts, ignoreIfExists)
     } catch {
       case e: InvocationTargetException => replaceExistException(e.getCause)
       case e: Throwable => replaceExistException(e)
@@ -687,17 +705,19 @@ private[hive] class HiveClientImpl(
       } catch {
         case e: Exception =>
           val remainingParts = matchingParts.toBuffer --= droppedParts
+          // scalastyle:off line.size.limit
           logError(
-            s"""
+            log"""
                |======================
-               |Attempt to drop the partition specs in table '$table' database '$db':
-               |${specs.mkString("\n")}
+               |Attempt to drop the partition specs in table '${MDC(TABLE_NAME, table)}' database '${MDC(DATABASE_NAME, db)}':
+               |${MDC(PARTITION_SPECS, specs.mkString("\n"))}
                |In this attempt, the following partitions have been dropped successfully:
-               |${droppedParts.mkString("\n")}
+               |${MDC(DROPPED_PARTITIONS, droppedParts.mkString("\n"))}
                |The remaining partitions have not been dropped:
-               |${remainingParts.mkString("\n")}
+               |${MDC(REMAINING_PARTITIONS, remainingParts.mkString("\n"))}
                |======================
              """.stripMargin)
+          // scalastyle:on line.size.limit
           throw e
       }
       droppedParts += partition
@@ -858,8 +878,19 @@ private[hive] class HiveClientImpl(
       // Since HIVE-18238(Hive 3.0.0), the Driver.close function's return type changed
       // and the CommandProcessorFactory.clean function removed.
       driver.getClass.getMethod("close").invoke(driver)
-      if (version != hive.v3_0 && version != hive.v3_1) {
+      if (version != hive.v3_0 && version != hive.v3_1 && version != hive.v4_0) {
         CommandProcessorFactory.clean(conf)
+      }
+    }
+
+    def getResponseCode(response: CommandProcessorResponse): Int = {
+      if (version < hive.v4_0) {
+        response.getResponseCode
+      } else {
+        // Since Hive 4.0, response code is removed from CommandProcessorResponse.
+        // Here we simply return 0 for the positive cases as for error cases it will
+        // throw exceptions early.
+        0
       }
     }
 
@@ -875,43 +906,57 @@ private[hive] class HiveClientImpl(
       val proc = shim.getCommandProcessor(tokens(0), conf)
       proc match {
         case driver: Driver =>
-          val response: CommandProcessorResponse = driver.run(cmd)
-          // Throw an exception if there is an error in query processing.
-          if (response.getResponseCode != 0) {
+          try {
+            val response: CommandProcessorResponse = driver.run(cmd)
+            if (getResponseCode(response) != 0) {
+              // Throw an exception if there is an error in query processing.
+              // This works for hive 3.x and earlier versions.
+              throw new QueryExecutionException(response.getErrorMessage)
+            }
+            driver.setMaxRows(maxRows)
+            val results = shim.getDriverResults(driver)
+            results
+          } catch {
+            case e @ (_: QueryExecutionException | _: SparkThrowable) =>
+              throw e
+            case e: Exception =>
+              // Wrap the original hive error with QueryExecutionException and throw it
+              // if there is an error in query processing.
+              // This works for hive 4.x and later versions.
+              throw new QueryExecutionException(ExceptionUtils.getStackTrace(e))
+          } finally {
             closeDriver(driver)
-            throw new QueryExecutionException(response.getErrorMessage)
           }
-          driver.setMaxRows(maxRows)
-
-          val results = shim.getDriverResults(driver)
-          closeDriver(driver)
-          results
 
         case _ =>
-          if (state.out != null) {
+          val out = state.getClass.getField("out").get(state)
+          if (out != null) {
             // scalastyle:off println
-            state.out.println(tokens(0) + " " + cmd_1)
+            out.asInstanceOf[PrintStream].println(tokens(0) + " " + cmd_1)
             // scalastyle:on println
           }
           val response: CommandProcessorResponse = proc.run(cmd_1)
-          // Throw an exception if there is an error in query processing.
-          if (response.getResponseCode != 0) {
+          val responseCode = getResponseCode(response)
+          if (responseCode != 0) {
+            // Throw an exception if there is an error in query processing.
+            // This works for hive 3.x and earlier versions. For 4.x and later versions,
+            // It will go to the catch block directly.
             throw new QueryExecutionException(response.getErrorMessage)
           }
-          Seq(response.getResponseCode.toString)
+          Seq(responseCode.toString)
       }
     } catch {
       case e: Exception =>
         logError(
-          s"""
+          log"""
             |======================
             |HIVE FAILURE OUTPUT
             |======================
-            |${outputBuffer.toString}
+            |${MDC(LogKeys.OUTPUT_BUFFER, outputBuffer.toString)}
             |======================
             |END HIVE FAILURE OUTPUT
             |======================
-          """.stripMargin)
+          """.stripMargin, e)
         throw e
     } finally {
       if (state != null) {
@@ -968,7 +1013,7 @@ private[hive] class HiveClientImpl(
       partSpec,
       replace,
       numDP,
-      listBucketingEnabled = hiveTable.isStoredAsSubDirectories)
+      hiveTable)
   }
 
   override def createFunction(db: String, func: CatalogFunction): Unit = withHiveState {
@@ -1333,9 +1378,18 @@ private[hive] object HiveClientImpl extends Logging {
     // initialize spark or tez stuff, which is useless for spark.
     val engine = hiveConf.get("hive.execution.engine")
     if (engine != "mr") {
-      logWarning(s"Detected HiveConf hive.execution.engine is '$engine' and will be reset to 'mr'" +
-        " to disable useless hive logic")
+      logWarning(log"Detected HiveConf hive.execution.engine is '${MDC(ENGINE, engine)}' and " +
+        log"will be reset to 'mr' to disable useless hive logic")
       hiveConf.set("hive.execution.engine", "mr", SOURCE_SPARK)
+    }
+    val cpType = hiveConf.get("datanucleus.connectionPoolingType")
+    // Bonecp might cause memory leak, it could affect some hive client versions we support
+    // See more details in HIVE-15551
+    // Also, Bonecp is removed in Hive 4.0.0, see HIVE-23258
+    // Here we use DBCP to replace bonecp instead of HikariCP as HikariCP was introduced in
+    // Hive 2.2.0 (see HIVE-13931) while the minium Hive we support is 2.0.0.
+    if ("bonecp".equalsIgnoreCase(cpType)) {
+      hiveConf.set("datanucleus.connectionPoolingType", "DBCP", SOURCE_SPARK)
     }
     hiveConf
   }

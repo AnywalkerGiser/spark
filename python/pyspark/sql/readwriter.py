@@ -17,16 +17,15 @@
 import sys
 from typing import cast, overload, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING, Union
 
-from py4j.java_gateway import JavaClass, JavaObject
-
-from pyspark import RDD
-from pyspark.sql.column import _to_seq, _to_java_column, Column
+from pyspark.util import is_remote_only
 from pyspark.sql.types import StructType
 from pyspark.sql import utils
 from pyspark.sql.utils import to_str
 from pyspark.errors import PySparkTypeError, PySparkValueError
 
 if TYPE_CHECKING:
+    from py4j.java_gateway import JavaObject
+    from pyspark.core.rdd import RDD
     from pyspark.sql._typing import OptionalPrimitiveType, ColumnOrName
     from pyspark.sql.session import SparkSession
     from pyspark.sql.dataframe import DataFrame
@@ -70,7 +69,7 @@ class DataFrameReader(OptionUtils):
         self._jreader = spark._jsparkSession.read()
         self._spark = spark
 
-    def _df(self, jdf: JavaObject) -> "DataFrame":
+    def _df(self, jdf: "JavaObject") -> "DataFrame":
         from pyspark.sql.dataframe import DataFrame
 
         return DataFrame(jdf, self._spark)
@@ -155,8 +154,8 @@ class DataFrameReader(OptionUtils):
             self._jreader = self._jreader.schema(schema)
         else:
             raise PySparkTypeError(
-                error_class="NOT_STR_OR_STRUCT",
-                message_parameters={
+                errorClass="NOT_STR_OR_STRUCT",
+                messageParameters={
                     "arg_name": "schema",
                     "arg_type": type(schema).__name__,
                 },
@@ -320,7 +319,7 @@ class DataFrameReader(OptionUtils):
 
     def json(
         self,
-        path: Union[str, List[str], RDD[str]],
+        path: Union[str, List[str], "RDD[str]"],
         schema: Optional[Union[StructType, str]] = None,
         primitivesAsString: Optional[Union[bool, str]] = None,
         prefersDecimal: Optional[Union[bool, str]] = None,
@@ -345,6 +344,7 @@ class DataFrameReader(OptionUtils):
         modifiedBefore: Optional[Union[bool, str]] = None,
         modifiedAfter: Optional[Union[bool, str]] = None,
         allowNonNumericNumbers: Optional[Union[bool, str]] = None,
+        useUnsafeRow: Optional[Union[bool, str]] = None,
     ) -> "DataFrame":
         """
         Loads JSON files and returns the results as a :class:`DataFrame`.
@@ -459,13 +459,18 @@ class DataFrameReader(OptionUtils):
             modifiedBefore=modifiedBefore,
             modifiedAfter=modifiedAfter,
             allowNonNumericNumbers=allowNonNumericNumbers,
+            useUnsafeRow=useUnsafeRow,
         )
         if isinstance(path, str):
             path = [path]
         if type(path) == list:
             assert self._spark._sc._jvm is not None
             return self._df(self._jreader.json(self._spark._sc._jvm.PythonUtils.toSeq(path)))
-        elif isinstance(path, RDD):
+
+        if not is_remote_only():
+            from pyspark.core.rdd import RDD  # noqa: F401
+
+        if not is_remote_only() and isinstance(path, RDD):
 
             def func(iterator: Iterable) -> Iterable:
                 for x in iterator:
@@ -482,8 +487,8 @@ class DataFrameReader(OptionUtils):
             return self._df(self._jreader.json(jrdd))
         else:
             raise PySparkTypeError(
-                error_class="NOT_STR_OR_LIST_OF_RDD",
-                message_parameters={
+                errorClass="NOT_STR_OR_LIST_OF_RDD",
+                messageParameters={
                     "arg_name": "path",
                     "arg_type": type(path).__name__,
                 },
@@ -615,6 +620,8 @@ class DataFrameReader(OptionUtils):
         |  Tom|  20|  NULL|
         +-----+----+------+
         """
+        from pyspark.sql.classic.column import _to_seq
+
         mergeSchema = options.get("mergeSchema", None)
         pathGlobFilter = options.get("pathGlobFilter", None)
         modifiedBefore = options.get("modifiedBefore", None)
@@ -829,7 +836,11 @@ class DataFrameReader(OptionUtils):
         if type(path) == list:
             assert self._spark._sc._jvm is not None
             return self._df(self._jreader.csv(self._spark._sc._jvm.PythonUtils.toSeq(path)))
-        elif isinstance(path, RDD):
+
+        if not is_remote_only():
+            from pyspark.core.rdd import RDD  # noqa: F401
+
+        if not is_remote_only() and isinstance(path, RDD):
 
             def func(iterator):
                 for x in iterator:
@@ -852,8 +863,8 @@ class DataFrameReader(OptionUtils):
             return self._df(self._jreader.csv(jdataset))
         else:
             raise PySparkTypeError(
-                error_class="NOT_STR_OR_LIST_OF_RDD",
-                message_parameters={
+                errorClass="NOT_STR_OR_LIST_OF_RDD",
+                messageParameters={
                     "arg_name": "path",
                     "arg_type": type(path).__name__,
                 },
@@ -861,7 +872,7 @@ class DataFrameReader(OptionUtils):
 
     def xml(
         self,
-        path: Union[str, List[str], RDD[str]],
+        path: Union[str, List[str], "RDD[str]"],
         rowTag: Optional[str] = None,
         schema: Optional[Union[StructType, str]] = None,
         excludeAttribute: Optional[Union[bool, str]] = None,
@@ -952,7 +963,11 @@ class DataFrameReader(OptionUtils):
         if type(path) == list:
             assert self._spark._sc._jvm is not None
             return self._df(self._jreader.xml(self._spark._sc._jvm.PythonUtils.toSeq(path)))
-        elif isinstance(path, RDD):
+
+        if not is_remote_only():
+            from pyspark.core.rdd import RDD  # noqa: F401
+
+        if not is_remote_only() and isinstance(path, RDD):
 
             def func(iterator: Iterable) -> Iterable:
                 for x in iterator:
@@ -975,8 +990,8 @@ class DataFrameReader(OptionUtils):
             return self._df(self._jreader.xml(jdataset))
         else:
             raise PySparkTypeError(
-                error_class="NOT_STR_OR_LIST_OF_RDD",
-                message_parameters={
+                errorClass="NOT_STR_OR_LIST_OF_RDD",
+                messageParameters={
                     "arg_name": "path",
                     "arg_type": type(path).__name__,
                 },
@@ -1030,6 +1045,8 @@ class DataFrameReader(OptionUtils):
         |100|Hyukjin Kwon|
         +---+------------+
         """
+        from pyspark.sql.classic.column import _to_seq
+
         self._set_opts(
             mergeSchema=mergeSchema,
             pathGlobFilter=pathGlobFilter,
@@ -1132,6 +1149,8 @@ class DataFrameReader(OptionUtils):
         -------
         :class:`DataFrame`
         """
+        from py4j.java_gateway import JavaClass
+
         if properties is None:
             properties = dict()
         assert self._spark._sc._gateway is not None
@@ -1155,7 +1174,7 @@ class DataFrameReader(OptionUtils):
         if predicates is not None:
             gateway = self._spark._sc._gateway
             assert gateway is not None
-            jpredicates = utils.toJArray(gateway, gateway.jvm.java.lang.String, predicates)
+            jpredicates = utils.to_java_array(gateway, gateway.jvm.java.lang.String, predicates)
             return self._df(self._jreader.jdbc(url, table, jpredicates, jprop))
         return self._df(self._jreader.jdbc(url, table, jprop))
 
@@ -1177,7 +1196,7 @@ class DataFrameWriter(OptionUtils):
         self._spark = df.sparkSession
         self._jwrite = df._jdf.write()
 
-    def _sq(self, jsq: JavaObject) -> "StreamingQuery":
+    def _sq(self, jsq: "JavaObject") -> "StreamingQuery":
         from pyspark.sql.streaming import StreamingQuery
 
         return StreamingQuery(jsq)
@@ -1426,6 +1445,8 @@ class DataFrameWriter(OptionUtils):
         |100|
         +---+
         """
+        from pyspark.sql.classic.column import _to_seq
+
         if len(cols) == 1 and isinstance(cols[0], (list, tuple)):
             cols = cols[0]  # type: ignore[assignment]
         self._jwrite = self._jwrite.partitionBy(
@@ -1489,10 +1510,12 @@ class DataFrameWriter(OptionUtils):
         +---+------------+
         >>> _ = spark.sql("DROP TABLE bucketed_table")
         """
+        from pyspark.sql.classic.column import _to_seq
+
         if not isinstance(numBuckets, int):
             raise PySparkTypeError(
-                error_class="NOT_INT",
-                message_parameters={
+                errorClass="NOT_INT",
+                messageParameters={
                     "arg_name": "numBuckets",
                     "arg_type": type(numBuckets).__name__,
                 },
@@ -1501,8 +1524,8 @@ class DataFrameWriter(OptionUtils):
         if isinstance(col, (list, tuple)):
             if cols:
                 raise PySparkValueError(
-                    error_class="CANNOT_SET_TOGETHER",
-                    message_parameters={
+                    errorClass="CANNOT_SET_TOGETHER",
+                    messageParameters={
                         "arg_list": f"`col` of type {type(col).__name__} and `cols`",
                     },
                 )
@@ -1512,16 +1535,16 @@ class DataFrameWriter(OptionUtils):
         for c in cols:
             if not isinstance(c, str):
                 raise PySparkTypeError(
-                    error_class="NOT_LIST_OF_STR",
-                    message_parameters={
+                    errorClass="NOT_LIST_OF_STR",
+                    messageParameters={
                         "arg_name": "cols",
                         "arg_type": type(c).__name__,
                     },
                 )
         if not isinstance(col, str):
             raise PySparkTypeError(
-                error_class="NOT_LIST_OF_STR",
-                message_parameters={
+                errorClass="NOT_LIST_OF_STR",
+                messageParameters={
                     "arg_name": "col",
                     "arg_type": type(col).__name__,
                 },
@@ -1580,11 +1603,13 @@ class DataFrameWriter(OptionUtils):
         +---+------------+
         >>> _ = spark.sql("DROP TABLE sorted_bucketed_table")
         """
+        from pyspark.sql.classic.column import _to_seq
+
         if isinstance(col, (list, tuple)):
             if cols:
                 raise PySparkValueError(
-                    error_class="CANNOT_SET_TOGETHER",
-                    message_parameters={
+                    errorClass="CANNOT_SET_TOGETHER",
+                    messageParameters={
                         "arg_list": f"`col` of type {type(col).__name__} and `cols`",
                     },
                 )
@@ -1594,16 +1619,16 @@ class DataFrameWriter(OptionUtils):
         for c in cols:
             if not isinstance(c, str):
                 raise PySparkTypeError(
-                    error_class="NOT_LIST_OF_STR",
-                    message_parameters={
+                    errorClass="NOT_LIST_OF_STR",
+                    messageParameters={
                         "arg_name": "cols",
                         "arg_type": type(c).__name__,
                     },
                 )
         if not isinstance(col, str):
             raise PySparkTypeError(
-                error_class="NOT_LIST_OF_STR",
-                message_parameters={
+                errorClass="NOT_LIST_OF_STR",
+                messageParameters={
                     "arg_name": "col",
                     "arg_type": type(col).__name__,
                 },
@@ -1612,6 +1637,42 @@ class DataFrameWriter(OptionUtils):
         self._jwrite = self._jwrite.sortBy(
             col, _to_seq(self._spark._sc, cast(Iterable["ColumnOrName"], cols))
         )
+        return self
+
+    @overload
+    def clusterBy(self, *cols: str) -> "DataFrameWriter":
+        ...
+
+    @overload
+    def clusterBy(self, *cols: List[str]) -> "DataFrameWriter":
+        ...
+
+    def clusterBy(self, *cols: Union[str, List[str]]) -> "DataFrameWriter":
+        """Clusters the data by the given columns to optimize query performance.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        cols : str or list
+            name of columns
+
+        Examples
+        --------
+        Write a DataFrame into a Parquet file with clustering.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="clusterBy") as d:
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}, {"age": 120, "name": "Ruifeng Zheng"}]
+        ...     ).write.clusterBy("name").mode("overwrite").format("parquet").save(d)
+        """
+        from pyspark.sql.classic.column import _to_seq
+
+        if len(cols) == 1 and isinstance(cols[0], (list, tuple)):
+            cols = cols[0]  # type: ignore[assignment]
+        assert len(cols) > 0, "clusterBy needs one or more clustering columns."
+        self._jwrite = self._jwrite.clusterBy(cols[0], _to_seq(self._spark._sc, cols[1:]))
         return self
 
     def save(
@@ -2269,6 +2330,8 @@ class DataFrameWriter(OptionUtils):
         Don't create too many partitions in parallel on a large cluster;
         otherwise Spark might crash your external database systems.
         """
+        from py4j.java_gateway import JavaClass
+
         if properties is None:
             properties = dict()
 
@@ -2336,7 +2399,7 @@ class DataFrameWriterV2:
         self._jwriter.tableProperty(property, value)
         return self
 
-    def partitionedBy(self, col: Column, *cols: Column) -> "DataFrameWriterV2":
+    def partitionedBy(self, col: "ColumnOrName", *cols: "ColumnOrName") -> "DataFrameWriterV2":
         """
         Partition the output table created by `create`, `createOrReplace`, or `replace` using
         the given columns or transforms.
@@ -2364,9 +2427,20 @@ class DataFrameWriterV2:
 
         .. versionadded: 3.1.0
         """
+        from pyspark.sql.classic.column import _to_seq, _to_java_column
+
         col = _to_java_column(col)
         cols = _to_seq(self._spark._sc, [_to_java_column(c) for c in cols])
         self._jwriter.partitionedBy(col, cols)
+        return self
+
+    def clusterBy(self, col: str, *cols: str) -> "DataFrameWriterV2":
+        """
+        Clusters the data by the given columns to optimize query performance.
+        """
+        from pyspark.sql.classic.column import _to_seq
+
+        self._jwriter.clusterBy(col, _to_seq(self._spark._sc, cols))
         return self
 
     def create(self) -> None:
@@ -2412,13 +2486,15 @@ class DataFrameWriterV2:
         """
         self._jwriter.append()
 
-    def overwrite(self, condition: Column) -> None:
+    def overwrite(self, condition: "ColumnOrName") -> None:
         """
         Overwrite rows matching the given filter condition with the contents of the data frame in
         the output table.
 
         .. versionadded: 3.1.0
         """
+        from pyspark.sql.classic.column import _to_java_column
+
         condition = _to_java_column(condition)
         self._jwriter.overwrite(condition)
 
@@ -2439,7 +2515,7 @@ def _test() -> None:
     import doctest
     import os
     import py4j
-    from pyspark.context import SparkContext
+    from pyspark.core.context import SparkContext
     from pyspark.sql import SparkSession
     import pyspark.sql.readwriter
 

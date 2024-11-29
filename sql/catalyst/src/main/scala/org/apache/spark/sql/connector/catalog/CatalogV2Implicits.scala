@@ -126,6 +126,13 @@ private[sql] object CatalogV2Implicits {
       case _ =>
         throw QueryCompilationErrors.missingCatalogAbilityError(plugin, "functions")
     }
+
+    def asProcedureCatalog: ProcedureCatalog = plugin match {
+        case procedureCatalog: ProcedureCatalog =>
+          procedureCatalog
+        case _ =>
+          throw QueryCompilationErrors.missingCatalogAbilityError(plugin, "procedures")
+    }
   }
 
   implicit class NamespaceHelper(namespace: Array[String]) {
@@ -162,6 +169,26 @@ private[sql] object CatalogV2Implicits {
       case ns if ns.isEmpty => TableIdentifier(ident.name)
       case Array(dbName) => TableIdentifier(ident.name, Some(dbName))
       case _ => throw QueryCompilationErrors.identifierTooManyNamePartsError(original)
+    }
+
+    /**
+     * Tries to convert catalog identifier to the table identifier. Table identifier does not
+     * support multiple namespaces (nested namespaces), so if identifier contains nested namespace,
+     * conversion cannot be done
+     * @param catalogName Catalog name. Identifier represents just one object in catalog, so it has
+     *                    no catalog name needed for table identifier creation
+     * @return Table identifier if conversion can be done, None otherwise
+     */
+    def asTableIdentifierOpt(catalogName: Option[String]): Option[TableIdentifier] = {
+      ident.namespace().toImmutableArraySeq match {
+        case Seq(singleNamespace) =>
+          Some(TableIdentifier(ident.name(), Some(singleNamespace), catalogName))
+        case Seq() =>
+          // If namespace is not given, catalog will not be used
+          Some(TableIdentifier(ident.name()))
+        case _ =>
+          None
+      }
     }
 
     def asFunctionIdentifier: FunctionIdentifier = ident.namespace() match {

@@ -24,8 +24,7 @@ import org.apache.spark.annotation.{Evolving, Experimental}
 @Experimental
 @Evolving
 /**
- * Interface used for arbitrary stateful operations with the v2 API to capture
- * single value state.
+ * Interface used for arbitrary stateful operations with the v2 API to capture single value state.
  */
 private[sql] trait ValueState[S] extends Serializable {
 
@@ -34,7 +33,8 @@ private[sql] trait ValueState[S] extends Serializable {
 
   /**
    * Get the state value if it exists
-   * @throws java.util.NoSuchElementException if the state does not exist
+   * @throws java.util.NoSuchElementException
+   *   if the state does not exist
    */
   @throws[NoSuchElementException]
   def get(): S
@@ -42,7 +42,12 @@ private[sql] trait ValueState[S] extends Serializable {
   /** Get the state if it exists as an option and None otherwise */
   def getOption(): Option[S]
 
-  /** Update the value of the state. */
+  /**
+   * Update the value of the state.
+   *
+   * @param newState
+   *   the new value
+   */
   def update(newState: S): Unit
 
   /** Remove this state. */

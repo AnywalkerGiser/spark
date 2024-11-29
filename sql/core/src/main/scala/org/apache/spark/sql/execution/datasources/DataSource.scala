@@ -27,7 +27,8 @@ import org.apache.hadoop.fs.Path
 
 import org.apache.spark.SparkException
 import org.apache.spark.deploy.SparkHadoopUtil
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys.{CLASS_NAME, DATA_SOURCE, DATA_SOURCES, PATHS}
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.catalog.{BucketSpec, CatalogStorageFormat, CatalogTable, CatalogUtils}
@@ -266,7 +267,8 @@ case class DataSource(
             checkAndGlobPathIfNecessary(checkEmptyGlobPath = false, checkFilesExist = false)
           createInMemoryFileIndex(globbedPaths)
         })
-        val forceNullable = sparkSession.conf.get(SQLConf.FILE_SOURCE_SCHEMA_FORCE_NULLABLE)
+        val forceNullable = sparkSession.sessionState.conf
+          .getConf(SQLConf.FILE_SOURCE_SCHEMA_FORCE_NULLABLE)
         val sourceDataSchema = if (forceNullable) dataSchema.asNullable else dataSchema
         SourceInfo(
           s"FileSource[$path]",
@@ -464,7 +466,7 @@ case class DataSource(
 
     val fileIndex = catalogTable.map(_.identifier).map { tableIdent =>
       sparkSession.table(tableIdent).queryExecution.analyzed.collect {
-        case LogicalRelation(t: HadoopFsRelation, _, _, _) => t.location
+        case LogicalRelationWithTable(t: HadoopFsRelation, _) => t.location
       }.head
     }
     // For partitioned relation r, r.schema's column ordering can be different from the column
@@ -512,7 +514,8 @@ case class DataSource(
         dataSource.createRelation(
           sparkSession.sqlContext, mode, caseInsensitiveOptions, Dataset.ofRows(sparkSession, data))
       case format: FileFormat =>
-        disallowWritingIntervals(outputColumns.map(_.dataType), forbidAnsiIntervals = false)
+        disallowWritingIntervals(
+          outputColumns.toStructType.asNullable, format.toString, forbidAnsiIntervals = false)
         val cmd = planForWritingFileFormat(format, mode, data)
         val qe = sparkSession.sessionState.executePlan(cmd)
         qe.assertCommandExecuted()
@@ -537,8 +540,8 @@ case class DataSource(
         }
         SaveIntoDataSourceCommand(data, dataSource, caseInsensitiveOptions, mode)
       case format: FileFormat =>
-        disallowWritingIntervals(data.schema.map(_.dataType), forbidAnsiIntervals = false)
-        DataSource.validateSchema(data.schema, sparkSession.sessionState.conf)
+        disallowWritingIntervals(data.schema, format.toString, forbidAnsiIntervals = false)
+        DataSource.validateSchema(format.toString, data.schema, sparkSession.sessionState.conf)
         planForWritingFileFormat(format, mode, data)
       case _ => throw SparkException.internalError(
         s"${providingClass.getCanonicalName} does not allow create table as select.")
@@ -564,12 +567,15 @@ case class DataSource(
   }
 
   private def disallowWritingIntervals(
-      dataTypes: Seq[DataType],
+      outputColumns: Seq[StructField],
+      format: String,
       forbidAnsiIntervals: Boolean): Unit = {
-    dataTypes.foreach(
-      TypeUtils.invokeOnceForInterval(_, forbidAnsiIntervals) {
-      throw QueryCompilationErrors.cannotSaveIntervalIntoExternalStorageError()
-    })
+    outputColumns.foreach { field =>
+      TypeUtils.invokeOnceForInterval(field.dataType, forbidAnsiIntervals) {
+      throw QueryCompilationErrors.dataTypeUnsupportedByDataSourceError(
+        format, field
+      )}
+    }
   }
 }
 
@@ -676,11 +682,10 @@ object DataSource extends Logging {
                 throw e
               }
           }
-        case _ :: Nil if isUserDefinedDataSource =>
-          // There was DSv1 or DSv2 loaded, but the same name source was found
-          // in user defined data source.
-          throw QueryCompilationErrors.foundMultipleDataSources(provider)
         case head :: Nil =>
+          // We do not check whether the provider is a Python data source
+          // (isUserDefinedDataSource) to avoid the lookup cost. Java data sources
+          // always take precedence over Python user-defined data sources.
           head.getClass
         case sources =>
           // There are multiple registered aliases for the input. If there is single datasource
@@ -695,8 +700,9 @@ object DataSource extends Logging {
             throw QueryCompilationErrors
               .foundMultipleXMLDataSourceError(provider1, sourceNames, externalSource.getName)
           } else if (internalSources.size == 1) {
-            logWarning(s"Multiple sources found for $provider1 (${sourceNames.mkString(", ")}), " +
-              s"defaulting to the internal datasource (${internalSources.head.getClass.getName}).")
+            logWarning(log"Multiple sources found for ${MDC(DATA_SOURCE, provider1)} " +
+              log"(${MDC(DATA_SOURCES, sourceNames.mkString(", "))}), defaulting to the " +
+              log"internal datasource (${MDC(CLASS_NAME, internalSources.head.getClass.getName)}).")
             internalSources.head.getClass
           } else {
             throw QueryCompilationErrors.findMultipleDataSourceError(provider1, sourceNames)
@@ -784,7 +790,7 @@ object DataSource extends Logging {
           globResult
         }.flatten
       } catch {
-        case e: SparkException => throw e.getCause
+        case e: SparkException => throw ThreadUtils.wrapCallerStacktrace(e.getCause)
       }
 
     if (checkFilesExist) {
@@ -796,7 +802,7 @@ object DataSource extends Logging {
           }
         }
       } catch {
-        case e: SparkException => throw e.getCause
+        case e: SparkException => throw ThreadUtils.wrapCallerStacktrace(e.getCause)
       }
     }
 
@@ -807,7 +813,7 @@ object DataSource extends Logging {
       }
       if (filteredIn.isEmpty) {
         logWarning(
-          s"All paths were ignored:\n  ${filteredOut.mkString("\n  ")}")
+          log"All paths were ignored:\n  ${MDC(PATHS, filteredOut.mkString("\n  "))}")
       } else {
         logDebug(
           s"Some paths were ignored:\n  ${filteredOut.mkString("\n  ")}")
@@ -835,7 +841,7 @@ object DataSource extends Logging {
    * @param schema
    * @param conf
    */
-  def validateSchema(schema: StructType, conf: SQLConf): Unit = {
+  def validateSchema(formatName: String, schema: StructType, conf: SQLConf): Unit = {
     val shouldAllowEmptySchema = conf.getConf(SQLConf.ALLOW_EMPTY_SCHEMAS_FOR_WRITES)
     def hasEmptySchema(schema: StructType): Boolean = {
       schema.size == 0 || schema.exists {
@@ -846,7 +852,7 @@ object DataSource extends Logging {
 
 
     if (!shouldAllowEmptySchema && hasEmptySchema(schema)) {
-      throw QueryCompilationErrors.writeEmptySchemasUnsupportedByDataSourceError()
+      throw QueryCompilationErrors.writeEmptySchemasUnsupportedByDataSourceError(formatName)
     }
   }
 }

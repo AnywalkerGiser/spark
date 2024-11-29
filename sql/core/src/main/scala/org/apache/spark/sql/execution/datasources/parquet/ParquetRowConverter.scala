@@ -38,6 +38,7 @@ import org.apache.spark.sql.catalyst.types.{PhysicalByteType, PhysicalShortType}
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, CaseInsensitiveMap, DateTimeUtils, GenericArrayData, ResolveDefaultColumns}
 import org.apache.spark.sql.catalyst.util.RebaseDateTime.RebaseSpec
 import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns._
+import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution.datasources.DataSourceUtils
 import org.apache.spark.sql.internal.SQLConf
@@ -94,7 +95,7 @@ private[parquet] class ParquetPrimitiveConverter(val updater: ParentContainerUpd
   override def addLong(value: Long): Unit = updater.setLong(value)
   override def addFloat(value: Float): Unit = updater.setFloat(value)
   override def addDouble(value: Double): Unit = updater.setDouble(value)
-  override def addBinary(value: Binary): Unit = updater.set(value.getBytes)
+  override def addBinary(value: Binary): Unit = updater.set(value.getBytesUnsafe)
 }
 
 /**
@@ -561,7 +562,7 @@ private[parquet] class ParquetRowConverter(
 
     override def setDictionary(dictionary: Dictionary): Unit = {
       this.expandedDictionary = Array.tabulate(dictionary.getMaxId + 1) { i =>
-        UTF8String.fromBytes(dictionary.decodeToBinary(i).getBytes)
+        UTF8String.fromBytes(dictionary.decodeToBinary(i).getBytesUnsafe)
       }
     }
 
@@ -621,7 +622,7 @@ private[parquet] class ParquetRowConverter(
         Decimal(unscaled, precision, scale)
       } else {
         // Otherwise, resorts to an unscaled `BigInteger` instead.
-        Decimal(new BigDecimal(new BigInteger(value.getBytes), scale), precision, scale)
+        Decimal(new BigDecimal(new BigInteger(value.getBytesUnsafe), scale), precision, scale)
       }
     }
   }
@@ -853,16 +854,35 @@ private[parquet] class ParquetRowConverter(
     private[this] var currentValue: Any = _
     private[this] var currentMetadata: Any = _
 
-    private[this] val converters = Array(
-      // Converter for value
-      newConverter(parquetType.getType(0), BinaryType, new ParentContainerUpdater {
-        override def set(value: Any): Unit = currentValue = value
-      }),
+    private[this] val converters = {
+      if (parquetType.getFieldCount() != 2) {
+        // We may allow more than two children in the future, so consider this unsupported.
+        throw QueryCompilationErrors.invalidVariantWrongNumFieldsError()
+      }
+      val valueAndMetadata = Seq("value", "metadata").map { colName =>
+        val idx = (0 until parquetType.getFieldCount())
+            .find(parquetType.getFieldName(_) == colName)
+        if (idx.isEmpty) {
+          throw QueryCompilationErrors.invalidVariantMissingFieldError(colName)
+        }
+        val child = parquetType.getType(idx.get)
+        if (!child.isPrimitive || child.getRepetition != Type.Repetition.REQUIRED ||
+            child.asPrimitiveType().getPrimitiveTypeName != BINARY) {
+          throw QueryCompilationErrors.invalidVariantNullableOrNotBinaryFieldError(colName)
+        }
+        child
+      }
+      Array(
+        // Converter for value
+        newConverter(valueAndMetadata(0), BinaryType, new ParentContainerUpdater {
+          override def set(value: Any): Unit = currentValue = value
+        }),
 
-      // Converter for metadata
-      newConverter(parquetType.getType(1), BinaryType, new ParentContainerUpdater {
-        override def set(value: Any): Unit = currentMetadata = value
+        // Converter for metadata
+        newConverter(valueAndMetadata(1), BinaryType, new ParentContainerUpdater {
+          override def set(value: Any): Unit = currentMetadata = value
       }))
+    }
 
     override def getConverter(fieldIndex: Int): Converter = converters(fieldIndex)
 

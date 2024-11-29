@@ -15,22 +15,28 @@
 # limitations under the License.
 #
 
+import os
 import unittest
 
 from pyspark.sql import SparkSession
 from pyspark.testing.connectutils import should_test_connect, connect_requirement_message
+from pyspark.testing.utils import have_sklearn, sklearn_requirement_message
 
 if should_test_connect:
     from pyspark.ml.tests.connect.test_legacy_mode_feature import FeatureTestsMixin
 
+    @unittest.skipIf(
+        not should_test_connect or not have_sklearn,
+        connect_requirement_message or sklearn_requirement_message,
+    )
+    class FeatureTestsOnConnect(FeatureTestsMixin, unittest.TestCase):
+        def setUp(self) -> None:
+            self.spark = SparkSession.builder.remote(
+                os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "local[2]")
+            ).getOrCreate()
 
-@unittest.skipIf(not should_test_connect, connect_requirement_message)
-class FeatureTestsOnConnect(FeatureTestsMixin, unittest.TestCase):
-    def setUp(self) -> None:
-        self.spark = SparkSession.builder.remote("local[2]").getOrCreate()
-
-    def tearDown(self) -> None:
-        self.spark.stop()
+        def tearDown(self) -> None:
+            self.spark.stop()
 
 
 if __name__ == "__main__":

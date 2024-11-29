@@ -81,6 +81,8 @@ case class FunctionTableSubqueryArgumentExpression(
   override def nullable: Boolean = false
   override def withNewPlan(plan: LogicalPlan): FunctionTableSubqueryArgumentExpression =
     copy(plan = plan)
+  override def withNewOuterAttrs(outerAttrs: Seq[Expression])
+  : FunctionTableSubqueryArgumentExpression = copy(outerAttrs = outerAttrs)
   override def hint: Option[HintInfo] = None
   override def withNewHint(hint: Option[HintInfo]): FunctionTableSubqueryArgumentExpression =
     copy()
@@ -170,9 +172,12 @@ case class FunctionTableSubqueryArgumentExpression(
     }
   }
 
-  private lazy val extraProjectedPartitioningExpressions: Seq[Alias] = {
+  lazy val extraProjectedPartitioningExpressions: Seq[Alias] = {
     partitionByExpressions.filter { e =>
-      !subqueryOutputs.contains(e)
+      !subqueryOutputs.contains(e) ||
+        // Skip deduplicating the 'partitionBy' expression(s) against the attributes of the input
+        // table if the UDTF also specified 'select' expression(s).
+        selectedInputExpressions.nonEmpty
     }.zipWithIndex.map { case (expr, index) =>
       Alias(expr, s"partition_by_$index")()
     }

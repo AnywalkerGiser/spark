@@ -2013,6 +2013,7 @@ class TaskSetManagerSuite
     val conf = new SparkConf()
     conf.set(config.SPECULATION_ENABLED, true)
     conf.set(config.SPECULATION_QUANTILE.key, speculationQuantile.toString)
+    conf.set(config.SPECULATION_MULTIPLIER.key, "1.5")
     // Set the number of slots per executor
     conf.set(config.EXECUTOR_CORES.key, numExecutorCores.toString)
     conf.set(config.CPUS_PER_TASK.key, numCoresPerTask.toString)
@@ -2414,6 +2415,7 @@ class TaskSetManagerSuite
     // minTimeToSpeculation parameter to checkSpeculatableTasks
     val conf = new SparkConf()
       .set(config.SPECULATION_MULTIPLIER, 0.0)
+      .set(config.SPECULATION_QUANTILE, 0.75)
       .set(config.SPECULATION_ENABLED, true)
     sc = new SparkContext("local", "test", conf)
     val ser = sc.env.closureSerializer.newInstance()
@@ -2721,6 +2723,39 @@ class TaskSetManagerSuite
     // executor are idle because task has removed by TaskEnd
     assert(executorMonitor.isExecutorIdle("exec1"))
     assert(executorMonitor.isExecutorIdle("exec2"))
+  }
+
+  test("SPARK-49252: TaskSetExcludeList can be created without HealthTracker") {
+    // When the excludeOnFailure.enabled is set to true, the TaskSetManager should create a
+    // TaskSetExcludelist even if the application level HealthTracker is not defined.
+    val conf = new SparkConf().set(config.EXCLUDE_ON_FAILURE_ENABLED_TASK_AND_STAGE, true)
+
+    // Create a task with two executors.
+    sc = new SparkContext("local", "test", conf)
+    sched = new FakeTaskScheduler(sc)
+    val taskSet = FakeTask.createTaskSet(1)
+
+    val taskSetManager = new TaskSetManager(sched, taskSet, 1,
+      // No application level HealthTracker.
+      healthTracker = None)
+    assert(taskSetManager.taskSetExcludelistHelperOpt.isDefined)
+  }
+
+  test("SPARK-49252: TaskSetExcludeList will be running in dry run mode when" +
+    "exludeOnFailure at taskset level is disabled but health tracker is enabled") {
+    // Disable the excludeOnFailure.enabled at taskset level.
+    val conf = new SparkConf().set(config.EXCLUDE_ON_FAILURE_ENABLED_TASK_AND_STAGE, false)
+
+    // Create a task with two executors.
+    sc = new SparkContext("local", "test", conf)
+    sched = new FakeTaskScheduler(sc)
+    val taskSet = FakeTask.createTaskSet(1)
+
+    val taskSetManager = new TaskSetManager(sched, taskSet, 1,
+      // Enable the application level HealthTracker.
+      healthTracker = Some(new HealthTracker(sc, None)))
+    assert(taskSetManager.taskSetExcludelistHelperOpt.isDefined)
+    assert(taskSetManager.taskSetExcludelistHelperOpt.get.isDryRun)
   }
 
 }

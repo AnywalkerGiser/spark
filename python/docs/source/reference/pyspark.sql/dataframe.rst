@@ -55,6 +55,7 @@ DataFrame
     DataFrame.dropna
     DataFrame.dtypes
     DataFrame.exceptAll
+    DataFrame.executionInfo
     DataFrame.explain
     DataFrame.fillna
     DataFrame.filter
@@ -83,6 +84,7 @@ DataFrame
     DataFrame.offset
     DataFrame.orderBy
     DataFrame.persist
+    DataFrame.plot
     DataFrame.printSchema
     DataFrame.randomSplit
     DataFrame.rdd
@@ -109,6 +111,7 @@ DataFrame
     DataFrame.tail
     DataFrame.take
     DataFrame.to
+    DataFrame.toArrow
     DataFrame.toDF
     DataFrame.toJSON
     DataFrame.toLocalIterator
@@ -129,6 +132,7 @@ DataFrame
     DataFrame.write
     DataFrame.writeStream
     DataFrame.writeTo
+    DataFrame.mergeInto
     DataFrame.pandas_api
     DataFrameNaFunctions.drop
     DataFrameNaFunctions.fill

@@ -18,7 +18,7 @@
 package org.apache.spark.sql.jdbc
 
 class MySQLDatabaseOnDocker extends DatabaseOnDocker {
-  override val imageName = sys.env.getOrElse("MYSQL_DOCKER_IMAGE_NAME", "mysql:8.3.0")
+  override val imageName = sys.env.getOrElse("MYSQL_DOCKER_IMAGE_NAME", "mysql:9.1.0")
   override val env = Map(
     "MYSQL_ROOT_PASSWORD" -> "rootpass"
   )
@@ -26,6 +26,6 @@ class MySQLDatabaseOnDocker extends DatabaseOnDocker {
   override val jdbcPort: Int = 3306
 
   override def getJdbcUrl(ip: String, port: Int): String =
-    s"jdbc:mysql://$ip:$port/" +
-      s"mysql?user=root&password=rootpass&allowPublicKeyRetrieval=true&useSSL=false"
+    s"jdbc:mysql://$ip:$port/mysql?user=root&password=rootpass&allowPublicKeyRetrieval=true" +
+      s"&useSSL=false&disableMariaDbDriver"
 }

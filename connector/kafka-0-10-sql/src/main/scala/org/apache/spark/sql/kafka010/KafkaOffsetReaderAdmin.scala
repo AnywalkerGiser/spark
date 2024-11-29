@@ -30,7 +30,8 @@ import org.apache.kafka.common.{IsolationLevel, TopicPartition}
 import org.apache.kafka.common.requests.OffsetFetchResponse
 
 import org.apache.spark.SparkEnv
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys.{NUM_RETRY, OFFSETS, TOPIC_PARTITION_OFFSET}
 import org.apache.spark.scheduler.ExecutorCacheTaskLocation
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.kafka010.KafkaSourceProvider.StrategyOnNoMatchStartingOffset
@@ -98,14 +99,18 @@ private[kafka010] class KafkaOffsetReaderAdmin(
    */
   private val minPartitions =
     readerOptions.get(KafkaSourceProvider.MIN_PARTITIONS_OPTION_KEY).map(_.toInt)
+  private val maxRecordsPerPartition =
+    readerOptions.get(KafkaSourceProvider.MAX_RECORDS_PER_PARTITION_OPTION_KEY).map(_.toLong)
 
-  private val rangeCalculator = new KafkaOffsetRangeCalculator(minPartitions)
+  private val rangeCalculator =
+    new KafkaOffsetRangeCalculator(minPartitions, maxRecordsPerPartition)
 
   /**
    * Whether we should divide Kafka TopicPartitions with a lot of data into smaller Spark tasks.
    */
-  private def shouldDivvyUpLargePartitions(numTopicPartitions: Int): Boolean = {
-    minPartitions.map(_ > numTopicPartitions).getOrElse(false)
+  private def shouldDivvyUpLargePartitions(offsetRanges: Seq[KafkaOffsetRange]): Boolean = {
+    minPartitions.map(_ > offsetRanges.size).getOrElse(false) ||
+    offsetRanges.exists(_.size > maxRecordsPerPartition.getOrElse(Long.MaxValue))
   }
 
   override def toString(): String = consumerStrategy.toString
@@ -119,10 +124,9 @@ private[kafka010] class KafkaOffsetReaderAdmin(
       isStartingOffsets: Boolean): Map[TopicPartition, Long] = {
     def validateTopicPartitions(partitions: Set[TopicPartition],
       partitionOffsets: Map[TopicPartition, Long]): Map[TopicPartition, Long] = {
-      assert(partitions == partitionOffsets.keySet,
-        "If startingOffsets contains specific offsets, you must specify all TopicPartitions.\n" +
-          "Use -1 for latest, -2 for earliest.\n" +
-          s"Specified: ${partitionOffsets.keySet} Assigned: ${partitions}")
+      if (partitions != partitionOffsets.keySet) {
+        throw KafkaExceptions.startOffsetDoesNotMatchAssigned(partitionOffsets.keySet, partitions)
+      }
       logDebug(s"Assigned partitions: $partitions. Seeking to $partitionOffsets")
       partitionOffsets
     }
@@ -335,8 +339,8 @@ private[kafka010] class KafkaOffsetReaderAdmin(
 
           incorrectOffsets = findIncorrectOffsets()
           if (incorrectOffsets.nonEmpty) {
-            logWarning("Found incorrect offsets in some partitions " +
-              s"(partition, previous offset, fetched offset): $incorrectOffsets")
+            logWarning(log"Found incorrect offsets in some partitions " +
+              log"(partition, previous offset, fetched offset): ${MDC(OFFSETS, incorrectOffsets)}")
             if (attempt < maxOffsetFetchAttempts) {
               logWarning("Retrying to fetch latest offsets because of incorrect offsets")
               Thread.sleep(offsetFetchAttemptIntervalMs)
@@ -397,7 +401,7 @@ private[kafka010] class KafkaOffsetReaderAdmin(
       KafkaOffsetRange(tp, fromOffset, untilOffset, None)
     }.toSeq
 
-    if (shouldDivvyUpLargePartitions(offsetRangesBase.size)) {
+    if (shouldDivvyUpLargePartitions(offsetRangesBase)) {
       val fromOffsetsMap =
         offsetRangesBase.map(range => (range.topicPartition, range.fromOffset)).toMap
       val untilOffsetsMap =
@@ -458,7 +462,7 @@ private[kafka010] class KafkaOffsetReaderAdmin(
         () =>
           KafkaExceptions.initialOffsetNotFoundForPartitions(deletedPartitions))
     }
-    logInfo(s"Partitions added: $newPartitionInitialOffsets")
+    logInfo(log"Partitions added: ${MDC(TOPIC_PARTITION_OFFSET, newPartitionInitialOffsets)}")
     newPartitionInitialOffsets.filter(_._2 != 0).foreach { case (p, o) =>
       reportDataLoss(
         s"Added partition $p starts from $o instead of 0. Some data may have been missed",
@@ -534,7 +538,8 @@ private[kafka010] class KafkaOffsetReaderAdmin(
         } catch {
           case NonFatal(e) =>
             lastException = e
-            logWarning(s"Error in attempt $attempt getting Kafka offsets: ", e)
+            logWarning(
+              log"Error in attempt ${MDC(NUM_RETRY, attempt)} getting Kafka offsets: ", e)
             attempt += 1
             Thread.sleep(offsetFetchAttemptIntervalMs)
             resetAdmin()

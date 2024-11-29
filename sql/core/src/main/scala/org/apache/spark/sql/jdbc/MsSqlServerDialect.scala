@@ -22,18 +22,19 @@ import java.util.Locale
 
 import scala.util.control.NonFatal
 
-import org.apache.spark.sql.AnalysisException
+import org.apache.spark.SparkThrowable
 import org.apache.spark.sql.catalyst.analysis.NonEmptyNamespaceException
 import org.apache.spark.sql.connector.catalog.Identifier
 import org.apache.spark.sql.connector.expressions.{Expression, NullOrdering, SortDirection}
-import org.apache.spark.sql.errors.QueryExecutionErrors
+import org.apache.spark.sql.connector.expressions.filter.Predicate
+import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
 import org.apache.spark.sql.execution.datasources.jdbc.JDBCOptions
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.jdbc.MsSqlServerDialect.{GEOGRAPHY, GEOMETRY}
 import org.apache.spark.sql.types._
 
 
-private case class MsSqlServerDialect() extends JdbcDialect {
+private case class MsSqlServerDialect() extends JdbcDialect with NoLegacyJDBCError {
   override def canHandle(url: String): Boolean =
     url.toLowerCase(Locale.ROOT).startsWith("jdbc:sqlserver")
 
@@ -58,6 +59,8 @@ private case class MsSqlServerDialect() extends JdbcDialect {
     supportedFunctions.contains(funcName)
 
   class MsSqlServerSQLBuilder extends JDBCSQLBuilder {
+    override protected def predicateToIntSQL(input: String): String =
+      "IIF(" + input + ", 1, 0)"
     override def visitSortOrder(
         sortKey: String, sortDirection: SortDirection, nullOrdering: NullOrdering): String = {
       (sortDirection, nullOrdering) match {
@@ -79,6 +82,36 @@ private case class MsSqlServerDialect() extends JdbcDialect {
       case "STDDEV_SAMP" => "STDEV"
       case _ => super.dialectFunctionName(funcName)
     }
+
+    override def build(expr: Expression): String = {
+      // MsSqlServer does not support boolean comparison using standard comparison operators
+      // We shouldn't propagate these queries to MsSqlServer
+      expr match {
+        case e: Predicate => e.name() match {
+          case "=" | "<>" | "<=>" | "<" | "<=" | ">" | ">=" =>
+            val Array(l, r) = e.children().map(inputToSQLNoBool)
+            visitBinaryComparison(e.name(), l, r)
+          case "CASE_WHEN" =>
+            // Since MsSqlServer cannot handle boolean expressions inside
+            // a CASE WHEN, it is necessary to convert those to another
+            // CASE WHEN expression that will return 1 or 0 depending on
+            // the result.
+            // Example:
+            // In:  ... CASE WHEN a = b THEN c = d ... END
+            // Out: ... CASE WHEN a = b THEN CASE WHEN c = d THEN 1 ELSE 0 END ... END = 1
+            val stringArray = e.children().grouped(2).flatMap {
+              case Array(whenExpression, thenExpression) =>
+                Array(inputToSQL(whenExpression), inputToSQLNoBool(thenExpression))
+              case Array(elseExpression) =>
+                Array(inputToSQLNoBool(elseExpression))
+            }.toArray
+
+            visitCaseWhen(stringArray) + " = 1"
+          case _ => super.build(expr)
+        }
+        case _ => super.build(expr)
+      }
+    }
   }
 
   override def compileExpression(expr: Expression): Option[String] = {
@@ -94,22 +127,22 @@ private case class MsSqlServerDialect() extends JdbcDialect {
 
   override def getCatalystType(
       sqlType: Int, typeName: String, size: Int, md: MetadataBuilder): Option[DataType] = {
-    if (typeName.contains("datetimeoffset")) {
-      // String is recommend by Microsoft SQL Server for datetimeoffset types in non-MS clients
-      Option(StringType)
-    } else {
-      if (SQLConf.get.legacyMsSqlServerNumericMappingEnabled) {
-        None
-      } else {
-        sqlType match {
-          // Data range of TINYINT is 0-255 so it needs to be stored in ShortType.
-          // Reference doc: https://learn.microsoft.com/en-us/sql/t-sql/data-types
-          case java.sql.Types.SMALLINT | java.sql.Types.TINYINT => Some(ShortType)
-          case java.sql.Types.REAL => Some(FloatType)
-          case GEOMETRY | GEOGRAPHY => Some(BinaryType)
-          case _ => None
+    sqlType match {
+      case _ if typeName.contains("datetimeoffset") =>
+        if (SQLConf.get.legacyMsSqlServerDatetimeOffsetMappingEnabled) {
+          Some(StringType)
+        } else {
+          Some(TimestampType)
         }
-      }
+      case java.sql.Types.SMALLINT | java.sql.Types.TINYINT
+          if !SQLConf.get.legacyMsSqlServerNumericMappingEnabled =>
+        // Data range of TINYINT is 0-255 so it needs to be stored in ShortType.
+        // Reference doc: https://learn.microsoft.com/en-us/sql/t-sql/data-types
+        Some(ShortType)
+      case java.sql.Types.REAL if !SQLConf.get.legacyMsSqlServerNumericMappingEnabled =>
+        Some(FloatType)
+      case GEOMETRY | GEOGRAPHY => Some(BinaryType)
+      case _ => None
     }
   }
 
@@ -121,6 +154,7 @@ private case class MsSqlServerDialect() extends JdbcDialect {
     case BinaryType => Some(JdbcType("VARBINARY(MAX)", java.sql.Types.VARBINARY))
     case ShortType if !SQLConf.get.legacyMsSqlServerNumericMappingEnabled =>
       Some(JdbcType("SMALLINT", java.sql.Types.SMALLINT))
+    case ByteType => Some(JdbcType("SMALLINT", java.sql.Types.TINYINT))
     case _ => None
   }
 
@@ -187,7 +221,8 @@ private case class MsSqlServerDialect() extends JdbcDialect {
       e: Throwable,
       errorClass: String,
       messageParameters: Map[String, String],
-      description: String): AnalysisException = {
+      description: String,
+      isRuntime: Boolean): Throwable with SparkThrowable = {
     e match {
       case sqlException: SQLException =>
         sqlException.getErrorCode match {
@@ -196,9 +231,13 @@ private case class MsSqlServerDialect() extends JdbcDialect {
               namespace = messageParameters.get("namespace").toArray,
               details = sqlException.getMessage,
               cause = Some(e))
-          case _ => super.classifyException(e, errorClass, messageParameters, description)
+           case 15335 if errorClass == "FAILED_JDBC.RENAME_TABLE" =>
+             val newTable = messageParameters("newName")
+             throw QueryCompilationErrors.tableAlreadyExistsError(newTable)
+          case _ =>
+            super.classifyException(e, errorClass, messageParameters, description, isRuntime)
         }
-      case _ => super.classifyException(e, errorClass, messageParameters, description)
+      case _ => super.classifyException(e, errorClass, messageParameters, description, isRuntime)
     }
   }
 

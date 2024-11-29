@@ -29,10 +29,12 @@ import org.json4s.{DefaultFormats, Formats, NoTypeHints}
 import org.json4s.jackson.Serialization
 
 import org.apache.spark.SparkEnv
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys.{HOST, PORT}
 import org.apache.spark.rpc.RpcEndpointRef
+import org.apache.spark.sql.Encoders
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
+import org.apache.spark.sql.catalyst.encoders.encoderFor
 import org.apache.spark.sql.catalyst.expressions.{UnsafeProjection, UnsafeRow}
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.connector.read.streaming.{ContinuousPartitionReader, ContinuousPartitionReaderFactory, ContinuousStream, Offset, PartitionOffset}
@@ -56,8 +58,7 @@ class TextSocketContinuousStream(
 
   implicit val defaultFormats: DefaultFormats = DefaultFormats
 
-  private val encoder = ExpressionEncoder.tuple(ExpressionEncoder[String](),
-    ExpressionEncoder[Timestamp]())
+  private val encoder = encoderFor(Encoders.tuple(Encoders.STRING, Encoders.TIMESTAMP))
 
   @GuardedBy("this")
   private var socket: Socket = _
@@ -179,7 +180,7 @@ class TextSocketContinuousStream(
             val line = reader.readLine()
             if (line == null) {
               // End of file reached
-              logWarning(s"Stream closed by $host:$port")
+              logWarning(log"Stream closed by ${MDC(HOST, host)}:${MDC(PORT, port)}")
               return
             }
             TextSocketContinuousStream.this.synchronized {

@@ -17,9 +17,11 @@
 
 package org.apache.spark.sql.catalyst.expressions
 
+import org.apache.spark.sql.internal.SQLConf
+
 // scalastyle:off line.size.limit
 @ExpressionDescription(
-  usage = "Usage: input [NOT] BETWEEN lower AND upper - evaluate if `input` is [not] in between `lower` and `upper`",
+  usage = "input [NOT] _FUNC_ lower AND upper - evaluate if `input` is [not] in between `lower` and `upper`",
   examples = """
     Examples:
       > SELECT 0.5 _FUNC_ 0.1 AND 1.0;
@@ -31,18 +33,21 @@ package org.apache.spark.sql.catalyst.expressions
       * lower - Lower bound of the between check.
       * upper - Upper bound of the between check.
   """,
-  since = "4.0.0",
+  since = "1.0.0",
   group = "conditional_funcs")
 case class Between private(input: Expression, lower: Expression, upper: Expression, replacement: Expression)
   extends RuntimeReplaceable with InheritAnalysisRules  {
   def this(input: Expression, lower: Expression, upper: Expression) = {
-    this(input, lower, upper, {
-      val commonExpr = CommonExpressionDef(input)
-      val ref = new CommonExpressionRef(commonExpr)
-      val replacement = And(GreaterThanOrEqual(ref, lower), LessThanOrEqual(ref, upper))
-      With(replacement, Seq(commonExpr))
-    })
-  };
+    this(input, lower, upper,
+      if (!SQLConf.get.getConf(SQLConf.ALWAYS_INLINE_COMMON_EXPR)) {
+        With(input) { case Seq(ref) =>
+          And(GreaterThanOrEqual(ref, lower), LessThanOrEqual(ref, upper))
+        }
+      } else {
+        And(GreaterThanOrEqual(input, lower), LessThanOrEqual(input, upper))
+      }
+    )
+  }
 
   override def parameters: Seq[Expression] = Seq(input, lower, upper)
 

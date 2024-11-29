@@ -705,6 +705,16 @@ A list of the available metrics, with a short description:
     The value is expressed in milliseconds.</td>
   </tr>
   <tr>
+    <td>ConcurrentGCCount</td>
+    <td>This metric returns the total number of collections that have occurred.
+        It only applies when the Java Garbage collector is G1 Concurrent GC.</td>
+  </tr>
+  <tr>
+    <td>ConcurrentGCTime</td>
+    <td>This metric returns the approximate accumulated collection elapsed time in milliseconds.
+        It only applies when the Java Garbage collector is G1 Concurrent GC.</td>
+  </tr> 
+  <tr>
     <td>resultSerializationTime</td>
     <td>Elapsed time spent serializing the task result. The value is expressed in milliseconds.</td>
   </tr>
@@ -1074,6 +1084,49 @@ Each instance can report to zero or more _sinks_. Sinks are contained in the
 * `Slf4jSink`: Sends metrics to slf4j as log entries.
 * `StatsdSink`: Sends metrics to a StatsD node.
 
+The Prometheus Servlet mirrors the JSON data exposed by the <code>Metrics Servlet</code> and the REST API, but in a time-series format. The following are the equivalent Prometheus Servlet endpoints.   
+
+<table>
+  <thead>
+    <tr>
+      <th>Component</th>
+      <th>Port</th>
+      <th>JSON End Point</th>
+      <th>Prometheus End Point</th>
+    </tr>
+  </thead>
+  <tr>
+    <td>Master</td>
+    <td>8080</td>
+    <td><code>/metrics/master/json/</code></td>
+    <td><code>/metrics/master/prometheus/</code></td>
+  </tr>
+  <tr>
+    <td>Master</td>
+    <td>8080</td>
+    <td><code>/metrics/applications/json/</code></td>
+    <td><code>/metrics/applications/prometheus/</code></td>
+  </tr>
+  <tr>
+    <td>Worker</td>
+    <td>8081</td>
+    <td><code>/metrics/json/</code></td>
+    <td><code>/metrics/prometheus/</code></td>
+  </tr>
+  <tr>
+    <td>Driver</td>
+    <td>4040</td>
+    <td><code>/metrics/json/</code></td>
+    <td><code>/metrics/prometheus/</code></td>
+  </tr>
+  <tr>
+    <td>Driver</td>
+    <td>4040</td>
+    <td><code>/api/v1/applications/{id}/executors/</code></td>
+    <td><code>/metrics/executors/prometheus/</code></td>
+  </tr>
+</table>
+
 Spark also supports a Ganglia sink which is not included in the default build due to
 licensing restrictions:
 
@@ -1187,7 +1240,7 @@ This is the component with the largest amount of instrumented metrics
 
 - namespace=appStatus (all metrics of type=counter)
   - **note:** Introduced in Spark 3.0. Conditional to a configuration parameter:
-   `spark.metrics.appStatusSource.enabled` (default is false)
+   `spark.metrics.appStatusSource.enabled` (default is true)
   - stages.failedStages.count
   - stages.skippedStages.count
   - stages.completedStages.count
@@ -1291,6 +1344,17 @@ These metrics are exposed by Spark executors.
   - shuffleRemoteBytesReadToDisk.count
   - shuffleTotalBytesRead.count
   - shuffleWriteTime.count
+  - Metrics related to push-based shuffle:
+    - shuffleCorruptMergedBlockChunks
+    - shuffleMergedFetchFallbackCount
+    - shuffleMergedRemoteBlocksFetched
+    - shuffleMergedLocalBlocksFetched
+    - shuffleMergedRemoteChunksFetched
+    - shuffleMergedLocalChunksFetched
+    - shuffleMergedRemoteBytesRead
+    - shuffleMergedLocalBytesRead
+    - shuffleRemoteReqsDuration
+    - shuffleMergedRemoteReqsDuration
   - succeededTasks.count
   - threadpool.activeTasks
   - threadpool.completeTasks
@@ -1414,12 +1478,14 @@ Note: applies to the shuffle service
 - blockTransferMessageRate (meter) - rate of block transfer messages,
   i.e. if batch fetches are enabled, this represents number of batches rather than number of blocks
 - blockTransferRateBytes (meter)
-- blockTransferAvgTime_1min (gauge - 1-minute moving average)
+- blockTransferAvgSize_1min (gauge - 1-minute moving average)
 - numActiveConnections.count
 - numRegisteredConnections.count
 - numCaughtExceptions.count
-- openBlockRequestLatencyMillis (histogram)
-- registerExecutorRequestLatencyMillis (histogram)
+- openBlockRequestLatencyMillis (timer)
+- registerExecutorRequestLatencyMillis (timer)
+- fetchMergedBlocksMetaLatencyMillis (timer)
+- finalizeShuffleMergeLatencyMillis (timer)
 - registeredExecutorsSize
 - shuffle-server.usedDirectMemory
 - shuffle-server.usedHeapMemory

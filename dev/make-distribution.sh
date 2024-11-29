@@ -187,7 +187,7 @@ echo "Spark $VERSION$GITREVSTRING built for Hadoop $SPARK_HADOOP_VERSION" > "$DI
 echo "Build flags: $@" >> "$DISTDIR/RELEASE"
 
 # Copy jars
-cp "$SPARK_HOME"/assembly/target/scala*/jars/* "$DISTDIR/jars/"
+cp -r "$SPARK_HOME"/assembly/target/scala*/jars/* "$DISTDIR/jars/"
 
 # Only create the hive-jackson directory if they exist.
 if [ -f "$DISTDIR"/jars/jackson-core-asl-1.9.13.jar ]; then
@@ -248,7 +248,8 @@ if [ "$MAKE_PIP" == "true" ]; then
   pushd "$SPARK_HOME/python" > /dev/null
   # Delete the egg info file if it exists, this can cache older setup files.
   rm -rf pyspark.egg-info || echo "No existing egg info file, skipping deletion"
-  python3 setup.py sdist
+  python3 packaging/classic/setup.py sdist
+  python3 packaging/connect/setup.py sdist
   popd > /dev/null
 else
   echo "Skipping building python distribution package"

@@ -17,7 +17,8 @@
 
 package org.apache.spark.sql.execution
 
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys.{LOGICAL_PLAN_COLUMNS, OPTIMIZED_PLAN_COLUMNS}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Encoder, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
@@ -26,6 +27,7 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, PartitioningCollection, UnknownPartitioning}
 import org.apache.spark.sql.catalyst.util.truncatedString
+import org.apache.spark.sql.connector.read.streaming.SparkDataStream
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.util.collection.Utils
 
@@ -96,13 +98,16 @@ case class LogicalRDD(
     rdd: RDD[InternalRow],
     outputPartitioning: Partitioning = UnknownPartitioning(0),
     override val outputOrdering: Seq[SortOrder] = Nil,
-    override val isStreaming: Boolean = false)(
+    override val isStreaming: Boolean = false,
+    @transient stream: Option[SparkDataStream] = None)(
     session: SparkSession,
     // originStats and originConstraints are intentionally placed to "second" parameter list,
     // to prevent catalyst rules to mistakenly transform and rewrite them. Do not change this.
     originStats: Option[Statistics] = None,
     originConstraints: Option[ExpressionSet] = None)
-  extends LeafNode with MultiInstanceRelation {
+  extends LeafNode
+  with StreamSourceAwareLogicalPlan
+  with MultiInstanceRelation {
 
   import LogicalRDD._
 
@@ -133,7 +138,8 @@ case class LogicalRDD(
       rdd,
       rewrittenPartitioning,
       rewrittenOrdering,
-      isStreaming
+      isStreaming,
+      stream
     )(session, rewrittenStatistics, rewrittenConstraints).asInstanceOf[this.type]
   }
 
@@ -157,6 +163,13 @@ case class LogicalRDD(
     // Therefore we assume that all subqueries are non-deterministic, and we do not expose any
     // constraints that contain a subquery.
     .filterNot(SubqueryExpression.hasSubquery)
+
+  override def withStream(stream: SparkDataStream): LogicalRDD = {
+    copy(stream = Some(stream))(session, originStats, originConstraints)
+  }
+
+  override def getStream: Option[SparkDataStream] = stream
+
 }
 
 object LogicalRDD extends Logging {
@@ -190,7 +203,8 @@ object LogicalRDD extends Logging {
       rdd,
       firstLeafPartitioning(executedPlan.outputPartitioning),
       executedPlan.outputOrdering,
-      isStreaming
+      isStreaming,
+      None
     )(originDataset.sparkSession, stats, constraints)
   }
 
@@ -226,10 +240,11 @@ object LogicalRDD extends Logging {
       (Some(rewrittenStatistics), Some(rewrittenConstraints))
     }.getOrElse {
       // can't rewrite stats and constraints, give up
-      logWarning("The output columns are expected to the same (for name and type) for output " +
-        "between logical plan and optimized plan, but they aren't. output in logical plan: " +
-        s"${logicalPlan.output.map(_.simpleString(10))} / output in optimized plan: " +
-        s"${optimizedPlan.output.map(_.simpleString(10))}")
+      logWarning(log"The output columns are expected to the same (for name and type) for output " +
+        log"between logical plan and optimized plan, but they aren't. output in logical plan: " +
+        log"${MDC(LOGICAL_PLAN_COLUMNS, logicalPlan.output.map(_.simpleString(10)))} " +
+        log"/ output in optimized plan: " +
+        log"${MDC(OPTIMIZED_PLAN_COLUMNS, optimizedPlan.output.map(_.simpleString(10)))}")
 
       (None, None)
     }
@@ -262,7 +277,11 @@ case class RDDScanExec(
     rdd: RDD[InternalRow],
     name: String,
     override val outputPartitioning: Partitioning = UnknownPartitioning(0),
-    override val outputOrdering: Seq[SortOrder] = Nil) extends LeafExecNode with InputRDDCodegen {
+    override val outputOrdering: Seq[SortOrder] = Nil,
+    @transient stream: Option[SparkDataStream] = None)
+  extends LeafExecNode
+  with StreamSourceAwareSparkPlan
+  with InputRDDCodegen {
 
   private def rddName: String = Option(rdd.name).map(n => s" $n").getOrElse("")
 
@@ -291,4 +310,11 @@ case class RDDScanExec(
   override protected val createUnsafeProjection: Boolean = true
 
   override def inputRDD: RDD[InternalRow] = rdd
+
+  // Don't care about `stream` when canonicalizing.
+  override protected def doCanonicalize(): SparkPlan = {
+    super.doCanonicalize().asInstanceOf[RDDScanExec].copy(stream = None)
+  }
+
+  override def getStream: Option[SparkDataStream] = stream
 }

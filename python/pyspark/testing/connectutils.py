@@ -21,30 +21,22 @@ import os
 import functools
 import unittest
 import uuid
+import contextlib
 
-grpc_requirement_message = None
-try:
-    import grpc
-except ImportError as e:
-    grpc_requirement_message = str(e)
-have_grpc = grpc_requirement_message is None
-
-
-grpc_status_requirement_message = None
-try:
-    import grpc_status
-except ImportError as e:
-    grpc_status_requirement_message = str(e)
-have_grpc_status = grpc_status_requirement_message is None
-
-googleapis_common_protos_requirement_message = None
-try:
-    from google.rpc import error_details_pb2
-except ImportError as e:
-    googleapis_common_protos_requirement_message = str(e)
-have_googleapis_common_protos = googleapis_common_protos_requirement_message is None
-
+from pyspark.testing import (
+    grpc_requirement_message,
+    have_grpc,
+    grpc_status_requirement_message,
+    have_grpc_status,
+    googleapis_common_protos_requirement_message,
+    have_googleapis_common_protos,
+    graphviz_requirement_message,
+    have_graphviz,
+    connect_requirement_message,
+    should_test_connect,
+)
 from pyspark import Row, SparkConf
+from pyspark.util import is_remote_only
 from pyspark.testing.utils import PySparkErrorTestUtils
 from pyspark.testing.sqlutils import (
     have_pandas,
@@ -54,15 +46,6 @@ from pyspark.testing.sqlutils import (
 )
 from pyspark.sql.session import SparkSession as PySparkSession
 
-
-connect_requirement_message = (
-    pandas_requirement_message
-    or pyarrow_requirement_message
-    or grpc_requirement_message
-    or googleapis_common_protos_requirement_message
-    or grpc_status_requirement_message
-)
-should_test_connect: str = typing.cast(str, connect_requirement_message is None)
 
 if should_test_connect:
     from pyspark.sql.connect.dataframe import DataFrame
@@ -168,13 +151,15 @@ class ReusedConnectTestCase(unittest.TestCase, SQLTestUtils, PySparkErrorTestUti
         conf = SparkConf(loadDefaults=False)
         # Make the server terminate reattachable streams every 1 second and 123 bytes,
         # to make the tests exercise reattach.
+        if conf._jconf is not None:
+            conf._jconf.remove("spark.master")
         conf.set("spark.connect.execute.reattachable.senderMaxStreamDuration", "1s")
         conf.set("spark.connect.execute.reattachable.senderMaxStreamSize", "123")
         return conf
 
     @classmethod
     def master(cls):
-        return "local[4]"
+        return os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "local[4]")
 
     @classmethod
     def setUpClass(cls):
@@ -184,6 +169,9 @@ class ReusedConnectTestCase(unittest.TestCase, SQLTestUtils, PySparkErrorTestUti
             .remote(cls.master())
             .getOrCreate()
         )
+        cls._legacy_sc = None
+        if not is_remote_only():
+            cls._legacy_sc = PySparkSession._instantiatedSession._sc
         cls.tempdir = tempfile.NamedTemporaryFile(delete=False)
         os.unlink(cls.tempdir.name)
         cls.testData = [Row(key=i, value=str(i)) for i in range(100)]
@@ -198,3 +186,11 @@ class ReusedConnectTestCase(unittest.TestCase, SQLTestUtils, PySparkErrorTestUti
         from pyspark.sql import is_remote
 
         self.assertTrue(is_remote())
+
+    def quiet(self):
+        from pyspark.testing.utils import QuietTest
+
+        if self._legacy_sc is not None:
+            return QuietTest(self._legacy_sc)
+        else:
+            return contextlib.nullcontext()

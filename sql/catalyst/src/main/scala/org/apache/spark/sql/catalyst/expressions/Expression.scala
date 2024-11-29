@@ -53,8 +53,6 @@ import org.apache.spark.sql.types._
  * - [[Unevaluable]]: an expression that is not supposed to be evaluated.
  * - [[CodegenFallback]]: an expression that does not have code gen implemented and falls back to
  *                        interpreted mode.
- * - [[NullIntolerant]]: an expression that is null intolerant (i.e. any null input will result in
- *                       null output).
  * - [[NonSQLExpression]]: a common base trait for the expressions that do not have SQL
  *                         expressions like representation. For example, `ScalaUDF`, `ScalaUDAF`,
  *                         and object `MapObjects` and `Invoke`.
@@ -140,6 +138,14 @@ abstract class Expression extends TreeNode[Expression] {
    * }}}
    */
   def stateful: Boolean = false
+
+
+  /**
+   * When an expression inherits this, meaning the expression is null intolerant (i.e. any null
+   * input will result in null output). We will use this information during constructing IsNotNull
+   * constraints.
+   */
+  def nullIntolerant: Boolean = false
 
   /**
    * Returns true if the expression could potentially throw an exception when evaluated.
@@ -376,24 +382,33 @@ abstract class Expression extends TreeNode[Expression] {
     }
 }
 
+/**
+ * An expression that cannot be evaluated but is guaranteed to be replaced with a foldable value
+ * by query optimizer (e.g. CurrentDate).
+ */
+trait FoldableUnevaluable extends Expression {
+  override def foldable: Boolean = true
+
+  override def eval(input: InternalRow = null): Any =
+    throw QueryExecutionErrors.cannotEvaluateExpressionError(this)
+
+  override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode =
+    throw QueryExecutionErrors.cannotGenerateCodeForExpressionError(this)
+}
 
 /**
  * An expression that cannot be evaluated. These expressions don't live past analysis or
  * optimization time (e.g. Star) and should not be evaluated during query planning and
  * execution.
  */
-trait Unevaluable extends Expression {
+trait Unevaluable extends Expression with FoldableUnevaluable {
 
-  /** Unevaluable is not foldable because we don't have an eval for it. */
+  /** Unevaluable is not foldable by default because we don't have an eval for it.
+   * Exception are expressions that will be replaced by a literal by Optimizer (e.g. CurrentDate).
+   * Hence we allow overriding overriding of this field in special cases.
+   */
   final override def foldable: Boolean = false
-
-  final override def eval(input: InternalRow = null): Any =
-    throw QueryExecutionErrors.cannotEvaluateExpressionError(this)
-
-  final override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode =
-    throw QueryExecutionErrors.cannotGenerateCodeForExpressionError(this)
 }
-
 
 /**
  * An expression that gets replaced at runtime (currently by the optimizer) into a different
@@ -411,8 +426,12 @@ trait RuntimeReplaceable extends Expression {
   // are semantically equal.
   override lazy val canonicalized: Expression = replacement.canonicalized
 
-  final override def eval(input: InternalRow = null): Any =
-    throw QueryExecutionErrors.cannotEvaluateExpressionError(this)
+  final override def eval(input: InternalRow = null): Any = {
+    // For convenience, we allow to evaluate `RuntimeReplaceable` expressions, in case we need to
+    // get a constant from foldable expression before the query execution starts.
+    assert(input == null)
+    replacement.eval()
+  }
   final override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode =
     throw QueryExecutionErrors.cannotGenerateCodeForExpressionError(this)
 }
@@ -1338,9 +1357,21 @@ trait CommutativeExpression extends Expression {
   /** Collects adjacent commutative operations. */
   private def gatherCommutative(
       e: Expression,
-      f: PartialFunction[CommutativeExpression, Seq[Expression]]): Seq[Expression] = e match {
-    case c: CommutativeExpression if f.isDefinedAt(c) => f(c).flatMap(gatherCommutative(_, f))
-    case other => other.canonicalized :: Nil
+      f: PartialFunction[CommutativeExpression, Seq[Expression]]): Seq[Expression] = {
+    val resultBuffer = scala.collection.mutable.Buffer[Expression]()
+    val stack = scala.collection.mutable.Stack[Expression](e)
+
+    // [SPARK-49977]: Use iterative approach to avoid creating many temporary List objects
+    // for deep expression trees through recursion.
+    while (stack.nonEmpty) {
+      stack.pop() match {
+        case c: CommutativeExpression if f.isDefinedAt(c) =>
+          stack.pushAll(f(c))
+        case other =>
+          resultBuffer += other.canonicalized
+      }
+    }
+    resultBuffer.toSeq
   }
 
   /**

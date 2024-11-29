@@ -149,8 +149,8 @@ class Accumulator(Generic[T]):
         """Get the accumulator's value; only usable in driver program"""
         if self._deserialized:
             raise PySparkRuntimeError(
-                error_class="VALUE_NOT_ACCESSIBLE",
-                message_parameters={
+                errorClass="VALUE_NOT_ACCESSIBLE",
+                messageParameters={
                     "value": "Accumulator.value",
                 },
             )
@@ -161,8 +161,8 @@ class Accumulator(Generic[T]):
         """Sets the accumulator's value; only usable in driver program"""
         if self._deserialized:
             raise PySparkRuntimeError(
-                error_class="VALUE_NOT_ACCESSIBLE",
-                message_parameters={
+                errorClass="VALUE_NOT_ACCESSIBLE",
+                messageParameters={
                     "value": "Accumulator.value",
                 },
             )
@@ -333,7 +333,7 @@ def _start_update_server(auth_token: str) -> AccumulatorServer:
 if __name__ == "__main__":
     import doctest
 
-    from pyspark.context import SparkContext
+    from pyspark.core.context import SparkContext
 
     globs = globals().copy()
     # The small batch size here ensures that we see multiple batches,

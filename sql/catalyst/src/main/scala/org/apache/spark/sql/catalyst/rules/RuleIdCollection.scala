@@ -54,6 +54,7 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveDeserializer" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveEncodersInUDF" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveFunctions" ::
+      "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveProcedures" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveGenerate" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveGroupingAnalytics" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveHigherOrderFunctions" ::
@@ -70,6 +71,7 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveSubqueryColumnAliases" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveTables" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveTempViews" ::
+      "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveTranspose" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveUnpivot" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveUpCast" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveUserSpecifiedColumns" ::
@@ -104,6 +106,7 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.analysis.TypeCoercionBase$CombinedTypeCoercionRule" ::
       "org.apache.spark.sql.catalyst.analysis.UpdateOuterReferences" ::
       "org.apache.spark.sql.catalyst.analysis.UpdateAttributeNullability" ::
+      "org.apache.spark.sql.catalyst.analysis.ResolveUpdateEventTimeWatermarkColumn" ::
       // Catalyst Optimizer rules
       "org.apache.spark.sql.catalyst.optimizer.BooleanSimplification" ::
       "org.apache.spark.sql.catalyst.optimizer.CollapseProject" ::
@@ -134,6 +137,7 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.optimizer.ObjectSerializerPruning" ::
       "org.apache.spark.sql.catalyst.optimizer.OptimizeCsvJsonExprs" ::
       "org.apache.spark.sql.catalyst.optimizer.OptimizeIn" ::
+      "org.apache.spark.sql.catalyst.optimizer.OptimizeJoinCondition" ::
       "org.apache.spark.sql.catalyst.optimizer.OptimizeRand" ::
       "org.apache.spark.sql.catalyst.optimizer.OptimizeOneRowPlan" ::
       "org.apache.spark.sql.catalyst.optimizer.Optimizer$OptimizeSubqueries" ::
@@ -147,7 +151,6 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.optimizer.PushFoldableIntoBranches" ::
       "org.apache.spark.sql.catalyst.optimizer.PushLeftSemiLeftAntiThroughJoin" ::
       "org.apache.spark.sql.catalyst.optimizer.ReassignLambdaVariableID" ::
-      "org.apache.spark.sql.catalyst.optimizer.RemoveDispensableExpressions" ::
       "org.apache.spark.sql.catalyst.optimizer.RemoveLiteralFromGroupExpressions" ::
       "org.apache.spark.sql.catalyst.optimizer.GenerateOptimization" ::
       "org.apache.spark.sql.catalyst.optimizer.RemoveNoopOperators" ::
@@ -173,7 +176,7 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.optimizer.UnwrapCastInBinaryComparison" ::  Nil
   }
 
-  if(Utils.isTesting) {
+  if (Utils.isTesting) {
     rulesNeedingIds = rulesNeedingIds ++ {
       // In the production code path, the following rules are run in CombinedTypeCoercionRule, and
       // hence we only need to add them for unit testing.

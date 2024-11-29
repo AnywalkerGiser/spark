@@ -17,24 +17,23 @@
 
 import unittest
 
+from pyspark.util import is_remote_only
 from pyspark.sql import SparkSession
-from pyspark.ml.torch.tests.test_data_loader import TorchDistributorDataLoaderUnitTests
+from pyspark.testing.utils import have_torch, torch_requirement_message
 
-have_torch = True
-try:
-    import torch  # noqa: F401
-except ImportError:
-    have_torch = False
+if not is_remote_only():
+    from pyspark.ml.torch.tests.test_data_loader import TorchDistributorDataLoaderUnitTests
 
-
-@unittest.skipIf(not have_torch, "torch is required")
-class TorchDistributorBaselineUnitTestsOnConnect(TorchDistributorDataLoaderUnitTests):
-    def setUp(self) -> None:
-        self.spark = (
-            SparkSession.builder.remote("local[1]")
-            .config("spark.default.parallelism", "1")
-            .getOrCreate()
-        )
+    @unittest.skipIf(
+        not have_torch or is_remote_only(), torch_requirement_message or "Requires JVM access"
+    )
+    class TorchDistributorBaselineUnitTestsOnConnect(TorchDistributorDataLoaderUnitTests):
+        def setUp(self) -> None:
+            self.spark = (
+                SparkSession.builder.remote("local[1]")
+                .config("spark.default.parallelism", "1")
+                .getOrCreate()
+            )
 
 
 if __name__ == "__main__":

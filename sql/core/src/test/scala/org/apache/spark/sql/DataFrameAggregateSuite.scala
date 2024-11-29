@@ -24,7 +24,9 @@ import scala.util.Random
 import org.scalatest.matchers.must.Matchers.the
 
 import org.apache.spark.{SparkArithmeticException, SparkRuntimeException}
+import org.apache.spark.sql.catalyst.plans.logical.Expand
 import org.apache.spark.sql.catalyst.util.AUTO_GENERATED_ALIAS
+import org.apache.spark.sql.errors.DataTypeErrors.toSQLId
 import org.apache.spark.sql.execution.WholeStageCodegenExec
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, ObjectHashAggregateExec, SortAggregateExec}
@@ -644,10 +646,10 @@ class DataFrameAggregateSuite extends QueryTest
     }
     checkError(
       exception = error,
-      errorClass = "DATATYPE_MISMATCH.UNSUPPORTED_INPUT_TYPE",
+      condition = "DATATYPE_MISMATCH.UNSUPPORTED_INPUT_TYPE",
       parameters = Map(
         "functionName" -> "`collect_set`",
-        "dataType" -> "\"MAP\"",
+        "dataType" -> "\"MAP\" or \"COLLATED STRING\"",
         "sqlExpr" -> "\"collect_set(b)\""
       ),
       context = ExpectedContext(
@@ -724,7 +726,7 @@ class DataFrameAggregateSuite extends QueryTest
       exception = intercept[AnalysisException] {
         testData.groupBy(sum($"key")).count()
       },
-      errorClass = "GROUP_BY_AGGREGATE",
+      condition = "GROUP_BY_AGGREGATE",
       parameters = Map("sqlExpr" -> "sum(key)"),
       context = ExpectedContext(fragment = "sum", callSitePattern = getCurrentClassCallSitePattern)
     )
@@ -984,7 +986,7 @@ class DataFrameAggregateSuite extends QueryTest
       }
       checkError(
         exception = error,
-        errorClass = "DATATYPE_MISMATCH.INVALID_ORDERING_TYPE",
+        condition = "DATATYPE_MISMATCH.INVALID_ORDERING_TYPE",
         sqlState = None,
         parameters = Map(
           "functionName" -> "`max_by`",
@@ -1054,7 +1056,7 @@ class DataFrameAggregateSuite extends QueryTest
       }
       checkError(
         exception = error,
-        errorClass = "DATATYPE_MISMATCH.INVALID_ORDERING_TYPE",
+        condition = "DATATYPE_MISMATCH.INVALID_ORDERING_TYPE",
         sqlState = None,
         parameters = Map(
           "functionName" -> "`min_by`",
@@ -1185,7 +1187,7 @@ class DataFrameAggregateSuite extends QueryTest
           exception = intercept[AnalysisException] {
             sql("SELECT COUNT_IF(x) FROM tempView")
           },
-          errorClass = "DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE",
+          condition = "DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE",
           sqlState = None,
           parameters = Map(
             "sqlExpr" -> "\"count_if(x)\"",
@@ -1349,7 +1351,7 @@ class DataFrameAggregateSuite extends QueryTest
       exception = intercept[AnalysisException] {
         Seq(Tuple1(Seq(1))).toDF("col").groupBy(struct($"col.a")).count()
       },
-      errorClass = "DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE",
+      condition = "DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE",
       parameters = Map(
         "sqlExpr" -> "\"col[a]\"",
         "paramIndex" -> "second",
@@ -1484,15 +1486,22 @@ class DataFrameAggregateSuite extends QueryTest
     val df2 = Seq((Period.ofMonths(Int.MaxValue), Duration.ofDays(106751991)),
       (Period.ofMonths(10), Duration.ofDays(10)))
       .toDF("year-month", "day")
-    val error = intercept[SparkArithmeticException] {
-      checkAnswer(df2.select(sum($"year-month")), Nil)
-    }
-    assert(error.getMessage contains "[INTERVAL_ARITHMETIC_OVERFLOW] integer overflow")
 
-    val error2 = intercept[SparkArithmeticException] {
-      checkAnswer(df2.select(sum($"day")), Nil)
-    }
-    assert(error2.getMessage contains "[INTERVAL_ARITHMETIC_OVERFLOW] long overflow")
+    checkError(
+      exception = intercept[SparkArithmeticException] {
+        checkAnswer(df2.select(sum($"year-month")), Nil)
+      },
+      condition = "INTERVAL_ARITHMETIC_OVERFLOW.WITH_SUGGESTION",
+      parameters = Map("functionName" -> toSQLId("try_add"))
+    )
+
+    checkError(
+      exception = intercept[SparkArithmeticException] {
+        checkAnswer(df2.select(sum($"day")), Nil)
+      },
+      condition = "INTERVAL_ARITHMETIC_OVERFLOW.WITH_SUGGESTION",
+      parameters = Map("functionName" -> toSQLId("try_add"))
+    )
   }
 
   test("SPARK-34837: Support ANSI SQL intervals by the aggregate function `avg`") {
@@ -1619,15 +1628,22 @@ class DataFrameAggregateSuite extends QueryTest
     val df2 = Seq((Period.ofMonths(Int.MaxValue), Duration.ofDays(106751991)),
       (Period.ofMonths(10), Duration.ofDays(10)))
       .toDF("year-month", "day")
-    val error = intercept[SparkArithmeticException] {
-      checkAnswer(df2.select(avg($"year-month")), Nil)
-    }
-    assert(error.getMessage contains "[INTERVAL_ARITHMETIC_OVERFLOW] integer overflow")
 
-    val error2 = intercept[SparkArithmeticException] {
-      checkAnswer(df2.select(avg($"day")), Nil)
-    }
-    assert(error2.getMessage contains "[INTERVAL_ARITHMETIC_OVERFLOW] long overflow")
+    checkError(
+      exception = intercept[SparkArithmeticException] {
+        checkAnswer(df2.select(avg($"year-month")), Nil)
+      },
+      condition = "INTERVAL_ARITHMETIC_OVERFLOW.WITH_SUGGESTION",
+      parameters = Map("functionName" -> toSQLId("try_add"))
+    )
+
+    checkError(
+      exception = intercept[SparkArithmeticException] {
+        checkAnswer(df2.select(avg($"day")), Nil)
+      },
+      condition = "INTERVAL_ARITHMETIC_OVERFLOW.WITH_SUGGESTION",
+      parameters = Map("functionName" -> toSQLId("try_add"))
+    )
 
     val df3 = intervalData.filter($"class" > 4)
     val avgDF3 = df3.select(avg($"year-month"), avg($"day"))
@@ -1666,8 +1682,14 @@ class DataFrameAggregateSuite extends QueryTest
     assert(spark.range(2).where("id > 2").agg(emptyAgg).limit(1).count() == 1)
   }
 
-  test("SPARK-38221: group by stream of complex expressions should not fail") {
+  test("SPARK-45685: group by `LazyList` of complex expressions should not fail") {
     val df = Seq(1).toDF("id").groupBy(LazyList($"id" + 1, $"id" + 2): _*).sum("id")
+    checkAnswer(df, Row(2, 3, 1))
+  }
+
+  test("SPARK-38221: group by `Stream` of complex expressions should not fail") {
+    @scala.annotation.nowarn("cat=deprecation")
+    val df = Seq(1).toDF("id").groupBy(Stream($"id" + 1, $"id" + 2): _*).sum("id")
     checkAnswer(df, Row(2, 3, 1))
   }
 
@@ -1917,7 +1939,7 @@ class DataFrameAggregateSuite extends QueryTest
           )
           .collect()
       },
-      errorClass = "HLL_INVALID_LG_K",
+      condition = "HLL_INVALID_LG_K",
       parameters = Map(
         "function" -> "`hll_sketch_agg`",
         "min" -> "4",
@@ -1933,7 +1955,7 @@ class DataFrameAggregateSuite extends QueryTest
           )
           .collect()
       },
-      errorClass = "HLL_INVALID_LG_K",
+      condition = "HLL_INVALID_LG_K",
       parameters = Map(
         "function" -> "`hll_sketch_agg`",
         "min" -> "4",
@@ -1956,7 +1978,7 @@ class DataFrameAggregateSuite extends QueryTest
           .withColumn("union", hll_union("hllsketch_left", "hllsketch_right"))
           .collect()
       },
-      errorClass = "HLL_UNION_DIFFERENT_LG_K",
+      condition = "HLL_UNION_DIFFERENT_LG_K",
       parameters = Map(
         "left" -> "12",
         "right" -> "20",
@@ -1979,7 +2001,7 @@ class DataFrameAggregateSuite extends QueryTest
           )
           .collect()
       },
-      errorClass = "HLL_UNION_DIFFERENT_LG_K",
+      condition = "HLL_UNION_DIFFERENT_LG_K",
       parameters = Map(
         "left" -> "12",
         "right" -> "20",
@@ -2000,7 +2022,7 @@ class DataFrameAggregateSuite extends QueryTest
             |""".stripMargin)
         checkAnswer(res, Nil)
       },
-      errorClass = "DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE",
+      condition = "DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE",
       parameters = Map(
         "sqlExpr" -> "\"hll_sketch_agg(value, text)\"",
         "paramIndex" -> "second",
@@ -2029,7 +2051,7 @@ class DataFrameAggregateSuite extends QueryTest
             |""".stripMargin)
         checkAnswer(res, Nil)
       },
-      errorClass = "DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE",
+      condition = "DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE",
       parameters = Map(
         "sqlExpr" -> "\"hll_union_agg(sketch, Hll_4)\"",
         "paramIndex" -> "second",
@@ -2071,7 +2093,7 @@ class DataFrameAggregateSuite extends QueryTest
             | cte1 join cte2 on cte1.id = cte2.id
             |""".stripMargin).collect()
       },
-      errorClass = "HLL_UNION_DIFFERENT_LG_K",
+      condition = "HLL_UNION_DIFFERENT_LG_K",
       parameters = Map(
         "left" -> "12",
         "right" -> "20",
@@ -2107,7 +2129,7 @@ class DataFrameAggregateSuite extends QueryTest
             |group by 1
             |""".stripMargin).collect()
       },
-      errorClass = "HLL_UNION_DIFFERENT_LG_K",
+      condition = "HLL_UNION_DIFFERENT_LG_K",
       parameters = Map(
         "left" -> "12",
         "right" -> "20",
@@ -2155,8 +2177,9 @@ class DataFrameAggregateSuite extends QueryTest
     )
   }
 
-  test("SPARK-46536 Support GROUP BY CalendarIntervalType") {
-    val numRows = 50
+  private def assertAggregateOnDataframe(
+      df: => DataFrame,
+      expected: Int): Unit = {
     val configurations = Seq(
       Seq.empty[(String, String)], // hash aggregate is used by default
       Seq(SQLConf.CODEGEN_FACTORY_MODE.key -> "NO_CODEGEN",
@@ -2168,22 +2191,82 @@ class DataFrameAggregateSuite extends QueryTest
       Seq("spark.sql.test.forceApplySortAggregate" -> "true")
     )
 
+    // Make tests faster
+    withSQLConf(SQLConf.SHUFFLE_PARTITIONS.key -> "3") {
+      for (conf <- configurations) {
+        withSQLConf(conf: _*) {
+          assert(df.count() == expected, df.queryExecution.simpleString)
+        }
+      }
+    }
+  }
+
+  test("SPARK-47430 Support GROUP BY MapType") {
+    def genMapData(dataType: String): String = {
+      s"""
+        |case when id % 4 == 0 then map()
+        |when id % 4 == 1 then map(cast(0 as $dataType), cast(0 as $dataType))
+        |when id % 4 == 2 then map(cast(0 as $dataType), cast(0 as $dataType),
+        |  cast(1 as $dataType), cast(1 as $dataType))
+        |else map(cast(1 as $dataType), cast(1 as $dataType),
+        |  cast(0 as $dataType), cast(0 as $dataType))
+        |end
+        |""".stripMargin
+    }
+    Seq("int", "long", "float", "double", "decimal(10, 2)", "string", "varchar(6)").foreach { dt =>
+      withTempView("v") {
+        spark.range(20)
+          .selectExpr(
+            s"cast(1 as $dt) as c1",
+            s"${genMapData(dt)} as c2",
+            "map(c1, null) as c3",
+            s"cast(null as map<$dt, $dt>) as c4")
+          .createOrReplaceTempView("v")
+
+        assertAggregateOnDataframe(
+          spark.sql("SELECT count(*) FROM v GROUP BY c2"),
+          3)
+        assertAggregateOnDataframe(
+          spark.sql("SELECT c2, count(*) FROM v GROUP BY c2"),
+          3)
+        assertAggregateOnDataframe(
+          spark.sql("SELECT c1, c2, count(*) FROM v GROUP BY c1, c2"),
+          3)
+        assertAggregateOnDataframe(
+          spark.sql("SELECT map(c1, c1) FROM v GROUP BY map(c1, c1)"),
+          1)
+        assertAggregateOnDataframe(
+          spark.sql("SELECT map(c1, c1), count(*) FROM v GROUP BY map(c1, c1)"),
+          1)
+        assertAggregateOnDataframe(
+          spark.sql("SELECT c3, count(*) FROM v GROUP BY c3"),
+          1)
+        assertAggregateOnDataframe(
+          spark.sql("SELECT c4, count(*) FROM v GROUP BY c4"),
+          1)
+        assertAggregateOnDataframe(
+          spark.sql("SELECT c1, c2, c3, c4, count(*) FROM v GROUP BY c1, c2, c3, c4"),
+          3)
+      }
+    }
+  }
+
+  test("SPARK-46536 Support GROUP BY CalendarIntervalType") {
+    val numRows = 50
+
     val dfSame = (0 until numRows)
       .map(_ => Tuple1(new CalendarInterval(1, 2, 3)))
       .toDF("c0")
+      .groupBy($"c0")
+      .count()
+    assertAggregateOnDataframe(dfSame, 1)
 
     val dfDifferent = (0 until numRows)
       .map(i => Tuple1(new CalendarInterval(i, i, i)))
       .toDF("c0")
-
-    for (conf <- configurations) {
-      withSQLConf(conf: _*) {
-        assert(createAggregate(dfSame).count() == 1)
-        assert(createAggregate(dfDifferent).count() == numRows)
-      }
-    }
-
-    def createAggregate(df: DataFrame): DataFrame = df.groupBy("c0").agg(count("*"))
+      .groupBy($"c0")
+      .count()
+    assertAggregateOnDataframe(dfDifferent, numRows)
   }
 
   test("SPARK-46779: Group by subquery with a cached relation") {
@@ -2202,7 +2285,7 @@ class DataFrameAggregateSuite extends QueryTest
   }
 
   private def assertDecimalSumOverflow(
-      df: DataFrame, ansiEnabled: Boolean, expectedAnswer: Row): Unit = {
+      df: DataFrame, ansiEnabled: Boolean, fnName: String, expectedAnswer: Row): Unit = {
     if (!ansiEnabled) {
       checkAnswer(df, expectedAnswer)
     } else {
@@ -2210,11 +2293,12 @@ class DataFrameAggregateSuite extends QueryTest
         df.collect()
       }
       assert(e.getMessage.contains("cannot be represented as Decimal") ||
-        e.getMessage.contains("Overflow in sum of decimals"))
+        e.getMessage.contains(s"Overflow in sum of decimals. Use 'try_$fnName' to tolerate " +
+          s"overflow and return NULL instead."))
     }
   }
 
-  def checkAggResultsForDecimalOverflow(aggFn: Column => Column): Unit = {
+  def checkAggResultsForDecimalOverflow(aggFn: Column => Column, fnName: String): Unit = {
     Seq("true", "false").foreach { wholeStageEnabled =>
       withSQLConf((SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, wholeStageEnabled)) {
         Seq(true, false).foreach { ansiEnabled =>
@@ -2238,27 +2322,27 @@ class DataFrameAggregateSuite extends QueryTest
               join(df, "intNum").agg(aggFn($"decNum"))
 
             val expectedAnswer = Row(null)
-            assertDecimalSumOverflow(df2, ansiEnabled, expectedAnswer)
+            assertDecimalSumOverflow(df2, ansiEnabled, fnName, expectedAnswer)
 
             val decStr = "1" + "0" * 19
             val d1 = spark.range(0, 12, 1, 1)
             val d2 = d1.select(expr(s"cast('$decStr' as decimal (38, 18)) as d")).agg(aggFn($"d"))
-            assertDecimalSumOverflow(d2, ansiEnabled, expectedAnswer)
+            assertDecimalSumOverflow(d2, ansiEnabled, fnName, expectedAnswer)
 
             val d3 = spark.range(0, 1, 1, 1).union(spark.range(0, 11, 1, 1))
             val d4 = d3.select(expr(s"cast('$decStr' as decimal (38, 18)) as d")).agg(aggFn($"d"))
-            assertDecimalSumOverflow(d4, ansiEnabled, expectedAnswer)
+            assertDecimalSumOverflow(d4, ansiEnabled, fnName, expectedAnswer)
 
             val d5 = d3.select(expr(s"cast('$decStr' as decimal (38, 18)) as d"),
               lit(1).as("key")).groupBy("key").agg(aggFn($"d").alias("aggd")).select($"aggd")
-            assertDecimalSumOverflow(d5, ansiEnabled, expectedAnswer)
+            assertDecimalSumOverflow(d5, ansiEnabled, fnName, expectedAnswer)
 
             val nullsDf = spark.range(1, 4, 1).select(expr(s"cast(null as decimal(38,18)) as d"))
 
             val largeDecimals = Seq(BigDecimal("1"* 20 + ".123"), BigDecimal("9"* 20 + ".123")).
               toDF("d")
             assertDecimalSumOverflow(
-              nullsDf.union(largeDecimals).agg(aggFn($"d")), ansiEnabled, expectedAnswer)
+              nullsDf.union(largeDecimals).agg(aggFn($"d")), ansiEnabled, fnName, expectedAnswer)
 
             val df3 = Seq(
               (BigDecimal("10000000000000000000"), 1),
@@ -2276,9 +2360,9 @@ class DataFrameAggregateSuite extends QueryTest
               (BigDecimal("20000000000000000000"), 2)).toDF("decNum", "intNum")
 
             val df6 = df3.union(df4).union(df5)
-            val df7 = df6.groupBy("intNum").agg(sum("decNum"), countDistinct("decNum")).
+            val df7 = df6.groupBy("intNum").agg(aggFn($"decNum"), countDistinct("decNum")).
               filter("intNum == 1")
-            assertDecimalSumOverflow(df7, ansiEnabled, Row(1, null, 2))
+            assertDecimalSumOverflow(df7, ansiEnabled, fnName, Row(1, null, 2))
           }
         }
       }
@@ -2286,11 +2370,11 @@ class DataFrameAggregateSuite extends QueryTest
   }
 
   test("SPARK-28067: Aggregate sum should not return wrong results for decimal overflow") {
-    checkAggResultsForDecimalOverflow(c => sum(c))
+    checkAggResultsForDecimalOverflow(c => sum(c), "sum")
   }
 
   test("SPARK-35955: Aggregate avg should not return wrong results for decimal overflow") {
-    checkAggResultsForDecimalOverflow(c => avg(c))
+    checkAggResultsForDecimalOverflow(c => avg(c), "avg")
   }
 
   test("SPARK-28224: Aggregate sum big decimal overflow") {
@@ -2301,13 +2385,147 @@ class DataFrameAggregateSuite extends QueryTest
     Seq(true, false).foreach { ansiEnabled =>
       withSQLConf((SQLConf.ANSI_ENABLED.key, ansiEnabled.toString)) {
         val structDf = largeDecimals.select("a").agg(sum("a"))
-        assertDecimalSumOverflow(structDf, ansiEnabled, Row(null))
+        assertDecimalSumOverflow(structDf, ansiEnabled, "sum", Row(null))
       }
     }
   }
 
   test("SPARK-32761: aggregating multiple distinct CONSTANT columns") {
      checkAnswer(sql("select count(distinct 2), count(distinct 2,3)"), Row(1, 1))
+  }
+
+  test("aggregating with various distinct expressions") {
+    abstract class AggregateTestCaseBase(
+        val query: String,
+        val resultSeq: Seq[Seq[Row]],
+        val hasExpandNodeInPlan: Boolean)
+    case class AggregateTestCase(
+        override val query: String,
+        override val resultSeq: Seq[Seq[Row]],
+        override val hasExpandNodeInPlan: Boolean)
+      extends AggregateTestCaseBase(query, resultSeq, hasExpandNodeInPlan)
+    case class AggregateTestCaseDefault(
+        override val query: String)
+      extends AggregateTestCaseBase(
+        query,
+        Seq(Seq(Row(0)), Seq(Row(1)), Seq(Row(1))),
+        hasExpandNodeInPlan = true)
+
+    val t = "t"
+    val testCases: Seq[AggregateTestCaseBase] = Seq(
+      AggregateTestCaseDefault(
+        s"""SELECT COUNT(DISTINCT "col") FROM $t"""
+      ),
+      AggregateTestCaseDefault(
+        s"SELECT COUNT(DISTINCT 1) FROM $t"
+      ),
+      AggregateTestCaseDefault(
+        s"SELECT COUNT(DISTINCT 1 + 2) FROM $t"
+      ),
+      AggregateTestCaseDefault(
+        s"SELECT COUNT(DISTINCT 1, 2, 1 + 2) FROM $t"
+      ),
+      AggregateTestCase(
+        s"SELECT COUNT(1), COUNT(DISTINCT 1) FROM $t",
+        Seq(Seq(Row(0, 0)), Seq(Row(1, 1)), Seq(Row(2, 1))),
+        hasExpandNodeInPlan = true
+      ),
+      AggregateTestCaseDefault(
+        s"""SELECT COUNT(DISTINCT 1, "col") FROM $t"""
+      ),
+      AggregateTestCaseDefault(
+        s"""SELECT COUNT(DISTINCT collation("abc")) FROM $t"""
+      ),
+      AggregateTestCaseDefault(
+        s"""SELECT COUNT(DISTINCT current_date()) FROM $t"""
+      ),
+      AggregateTestCaseDefault(
+        s"""SELECT COUNT(DISTINCT array(1, 2)[1]) FROM $t"""
+      ),
+      AggregateTestCaseDefault(
+        s"""SELECT COUNT(DISTINCT map(1, 2)[1]) FROM $t"""
+      ),
+      AggregateTestCaseDefault(
+        s"""SELECT COUNT(DISTINCT struct(1, 2).col1) FROM $t"""
+      ),
+      AggregateTestCase(
+        s"SELECT COUNT(DISTINCT 1) FROM $t GROUP BY col",
+        Seq(Seq(), Seq(Row(1)), Seq(Row(1), Row(1))),
+        hasExpandNodeInPlan = false
+      ),
+      AggregateTestCaseDefault(
+        s"SELECT COUNT(DISTINCT 1) FROM $t WHERE 1 = 1"
+      ),
+      AggregateTestCase(
+        s"SELECT COUNT(DISTINCT 1) FROM $t WHERE 1 = 0",
+        Seq(Seq(Row(0)), Seq(Row(0)), Seq(Row(0))),
+        hasExpandNodeInPlan = false
+      ),
+      AggregateTestCase(
+        s"SELECT SUM(DISTINCT 1) FROM (SELECT COUNT(DISTINCT 1) FROM $t)",
+        Seq(Seq(Row(1)), Seq(Row(1)), Seq(Row(1))),
+        hasExpandNodeInPlan = false
+      ),
+      AggregateTestCase(
+        s"SELECT SUM(DISTINCT 1) FROM (SELECT COUNT(1) FROM $t)",
+        Seq(Seq(Row(1)), Seq(Row(1)), Seq(Row(1))),
+        hasExpandNodeInPlan = false
+      ),
+      AggregateTestCase(
+        s"SELECT SUM(1) FROM (SELECT COUNT(DISTINCT 1) FROM $t)",
+        Seq(Seq(Row(1)), Seq(Row(1)), Seq(Row(1))),
+        hasExpandNodeInPlan = false
+      ),
+      AggregateTestCaseDefault(
+        s"SELECT SUM(x) FROM (SELECT COUNT(DISTINCT 1) AS x FROM $t)"),
+      AggregateTestCase(
+        s"""SELECT COUNT(DISTINCT 1), COUNT(DISTINCT "col") FROM $t""",
+        Seq(Seq(Row(0, 0)), Seq(Row(1, 1)), Seq(Row(1, 1))),
+        hasExpandNodeInPlan = true
+      ),
+      AggregateTestCase(
+        s"""SELECT COUNT(DISTINCT 1), COUNT(DISTINCT col) FROM $t""",
+        Seq(Seq(Row(0, 0)), Seq(Row(1, 1)), Seq(Row(1, 2))),
+        hasExpandNodeInPlan = true
+      )
+    )
+    withTable(t) {
+      sql(s"create table $t(col int) using parquet")
+      Seq(0, 1, 2).foreach(columnValue => {
+        if (columnValue != 0) {
+          sql(s"insert into $t(col) values($columnValue)")
+        }
+        testCases.foreach(testCase => {
+          val query = sql(testCase.query)
+          checkAnswer(query, testCase.resultSeq(columnValue))
+          val hasExpandNodeInPlan = query.queryExecution.optimizedPlan.collectFirst {
+            case _: Expand => true
+          }.nonEmpty
+          assert(hasExpandNodeInPlan == testCase.hasExpandNodeInPlan)
+        })
+      })
+    }
+  }
+
+  test("SPARK-49261: Literals in grouping expressions shouldn't result in unresolved aggregation") {
+    val data = Seq((1, 1.001d, 2), (2, 3.001d, 4), (2, 3.001, 4)).toDF("a", "b", "c")
+    withTempView("v1") {
+      data.createOrReplaceTempView("v1")
+      val df =
+        sql("""SELECT
+              |  ROUND(SUM(b), 6) AS sum1,
+              |  COUNT(DISTINCT a) AS count1,
+              |  COUNT(DISTINCT c) AS count2
+              |FROM (
+              |  SELECT
+              |    6 AS gb,
+              |    *
+              |  FROM v1
+              |)
+              |GROUP BY a, gb
+              |""".stripMargin)
+      checkAnswer(df, Row(1.001d, 1, 1) :: Row(6.002d, 1, 1) :: Nil)
+    }
   }
 }
 

@@ -133,7 +133,8 @@ abstract class PercentileBase
       if (frqLong > 0) {
         buffer.changeValue(key, frqLong, _ + frqLong)
       } else if (frqLong < 0) {
-        throw QueryExecutionErrors.negativeValueUnexpectedError(frequencyExpression)
+        throw QueryExecutionErrors.negativeValueUnexpectedError(
+          frequencyExpression, frqLong)
       }
     }
     buffer
@@ -343,7 +344,7 @@ case class Median(child: Expression)
   with ImplicitCastInputTypes
   with UnaryLike[Expression] {
   private lazy val percentile = new Percentile(child, Literal(0.5, DoubleType))
-  override def replacement: Expression = percentile
+  override lazy val replacement: Expression = percentile
   override def nodeName: String = "median"
   override def inputTypes: Seq[AbstractDataType] = percentile.inputTypes.take(1)
   override protected def withNewChildInternal(
@@ -362,7 +363,7 @@ case class PercentileCont(left: Expression, right: Expression, reverse: Boolean 
   with SupportsOrderingWithinGroup
   with BinaryLike[Expression] {
   private lazy val percentile = new Percentile(left, right, reverse)
-  override def replacement: Expression = percentile
+  override lazy val replacement: Expression = percentile
   override def nodeName: String = "percentile_cont"
   override def inputTypes: Seq[AbstractDataType] = percentile.inputTypes
   override def sql(isDistinct: Boolean): String = {

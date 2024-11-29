@@ -22,23 +22,17 @@ import shutil
 import tempfile
 from contextlib import contextmanager
 
-pandas_requirement_message = None
-try:
-    from pyspark.sql.pandas.utils import require_minimum_pandas_version
+from pyspark.sql import SparkSession
+from pyspark.sql.types import ArrayType, DoubleType, UserDefinedType, Row
+from pyspark.testing.utils import (
+    ReusedPySparkTestCase,
+    PySparkErrorTestUtils,
+    have_pandas,
+    pandas_requirement_message,
+    have_pyarrow,
+    pyarrow_requirement_message,
+)
 
-    require_minimum_pandas_version()
-except ImportError as e:
-    # If Pandas version requirement is not satisfied, skip related tests.
-    pandas_requirement_message = str(e)
-
-pyarrow_requirement_message = None
-try:
-    from pyspark.sql.pandas.utils import require_minimum_pyarrow_version
-
-    require_minimum_pyarrow_version()
-except ImportError as e:
-    # If Arrow version requirement is not satisfied, skip related tests.
-    pyarrow_requirement_message = str(e)
 
 test_not_compiled_message = None
 try:
@@ -48,13 +42,6 @@ try:
 except Exception as e:
     test_not_compiled_message = str(e)
 
-from pyspark.sql import SparkSession
-from pyspark.sql.types import ArrayType, DoubleType, UserDefinedType, Row
-from pyspark.testing.utils import ReusedPySparkTestCase, PySparkErrorTestUtils
-
-
-have_pandas = pandas_requirement_message is None
-have_pyarrow = pyarrow_requirement_message is None
 test_compiled = test_not_compiled_message is None
 
 
@@ -247,6 +234,29 @@ class SQLTestUtils:
             for f in functions:
                 self.spark.sql("DROP FUNCTION IF EXISTS %s" % f)
 
+    @contextmanager
+    def temp_env(self, pairs):
+        assert isinstance(pairs, dict), "pairs should be a dictionary."
+
+        keys = pairs.keys()
+        new_values = pairs.values()
+        old_values = [os.environ.get(key, None) for key in keys]
+        for key, new_value in zip(keys, new_values):
+            if new_value is None:
+                if key in os.environ:
+                    del os.environ[key]
+            else:
+                os.environ[key] = new_value
+        try:
+            yield
+        finally:
+            for key, old_value in zip(keys, old_values):
+                if old_value is None:
+                    if key in os.environ:
+                        del os.environ[key]
+                else:
+                    os.environ[key] = old_value
+
     @staticmethod
     def assert_close(a, b):
         c = [j[0] for j in b]
@@ -258,6 +268,7 @@ class ReusedSQLTestCase(ReusedPySparkTestCase, SQLTestUtils, PySparkErrorTestUti
     @classmethod
     def setUpClass(cls):
         super(ReusedSQLTestCase, cls).setUpClass()
+        cls._legacy_sc = cls.sc
         cls.spark = SparkSession(cls.sc)
         cls.tempdir = tempfile.NamedTemporaryFile(delete=False)
         os.unlink(cls.tempdir.name)

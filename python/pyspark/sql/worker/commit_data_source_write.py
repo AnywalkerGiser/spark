@@ -20,7 +20,6 @@ from typing import IO
 
 from pyspark.accumulators import _accumulatorRegistry
 from pyspark.errors import PySparkAssertionError
-from pyspark.java_gateway import local_connect_and_auth
 from pyspark.serializers import (
     read_bool,
     read_int,
@@ -28,7 +27,7 @@ from pyspark.serializers import (
     SpecialLengths,
 )
 from pyspark.sql.datasource import DataSourceWriter, WriterCommitMessage
-from pyspark.util import handle_worker_exception
+from pyspark.util import handle_worker_exception, local_connect_and_auth
 from pyspark.worker_util import (
     check_python_version,
     pickleSer,
@@ -61,14 +60,7 @@ def main(infile: IO, outfile: IO) -> None:
 
         # Receive the data source writer instance.
         writer = pickleSer._read_with_length(infile)
-        if not isinstance(writer, DataSourceWriter):
-            raise PySparkAssertionError(
-                error_class="PYTHON_DATA_SOURCE_TYPE_MISMATCH",
-                message_parameters={
-                    "expected": "an instance of DataSourceWriter",
-                    "actual": f"'{type(writer).__name__}'",
-                },
-            )
+        assert isinstance(writer, DataSourceWriter)
 
         # Receive the commit messages.
         num_messages = read_int(infile)
@@ -77,8 +69,8 @@ def main(infile: IO, outfile: IO) -> None:
             message = pickleSer._read_with_length(infile)
             if message is not None and not isinstance(message, WriterCommitMessage):
                 raise PySparkAssertionError(
-                    error_class="PYTHON_DATA_SOURCE_TYPE_MISMATCH",
-                    message_parameters={
+                    errorClass="DATA_SOURCE_TYPE_MISMATCH",
+                    messageParameters={
                         "expected": "an instance of WriterCommitMessage",
                         "actual": f"'{type(message).__name__}'",
                     },
@@ -91,9 +83,9 @@ def main(infile: IO, outfile: IO) -> None:
         # Commit or abort the Python data source write.
         # Note the commit messages can be None if there are failed tasks.
         if abort:
-            writer.abort(commit_messages)  # type: ignore[arg-type]
+            writer.abort(commit_messages)
         else:
-            writer.commit(commit_messages)  # type: ignore[arg-type]
+            writer.commit(commit_messages)
 
         # Send a status code back to JVM.
         write_int(0, outfile)
@@ -118,4 +110,6 @@ if __name__ == "__main__":
     java_port = int(os.environ["PYTHON_WORKER_FACTORY_PORT"])
     auth_secret = os.environ["PYTHON_WORKER_FACTORY_SECRET"]
     (sock_file, _) = local_connect_and_auth(java_port, auth_secret)
+    write_int(os.getpid(), sock_file)
+    sock_file.flush()
     main(sock_file, sock_file)

@@ -87,8 +87,8 @@ class SparkSessionTests3(unittest.TestCase, PySparkErrorTestUtils):
 
         self.check_error(
             exception=pe1.exception,
-            error_class="NO_ACTIVE_OR_DEFAULT_SESSION",
-            message_parameters={},
+            errorClass="NO_ACTIVE_OR_DEFAULT_SESSION",
+            messageParameters={},
         )
 
         spark = SparkSession.builder.master("local").getOrCreate()
@@ -193,9 +193,6 @@ class SparkSessionTests3(unittest.TestCase, PySparkErrorTestUtils):
             session.range(5).collect()
 
     def test_active_session_with_None_and_not_None_context(self):
-        from pyspark.context import SparkContext
-        from pyspark.conf import SparkConf
-
         sc = None
         session = None
         try:
@@ -232,10 +229,6 @@ class SparkSessionTests3(unittest.TestCase, PySparkErrorTestUtils):
                 (lambda: session.copyFromLocalToFs("", ""), "copyFromLocalToFs"),
                 (lambda: session.interruptTag(""), "interruptTag"),
                 (lambda: session.interruptOperation(""), "interruptOperation"),
-                (lambda: session.addTag(""), "addTag"),
-                (lambda: session.removeTag(""), "removeTag"),
-                (session.getTags, "getTags"),
-                (session.clearTags, "clearTags"),
             ]
 
             for func, name in unsupported:
@@ -244,8 +237,8 @@ class SparkSessionTests3(unittest.TestCase, PySparkErrorTestUtils):
 
                 self.check_error(
                     exception=pe1.exception,
-                    error_class="ONLY_SUPPORTED_WITH_SPARK_CONNECT",
-                    message_parameters={"feature": f"SparkSession.{name}"},
+                    errorClass="ONLY_SUPPORTED_WITH_SPARK_CONNECT",
+                    messageParameters={"feature": f"SparkSession.{name}"},
                 )
 
 
@@ -413,8 +406,8 @@ class SparkSessionBuilderTests(unittest.TestCase, PySparkErrorTestUtils):
 
         self.check_error(
             exception=pe1.exception,
-            error_class="CANNOT_CONFIGURE_SPARK_CONNECT_MASTER",
-            message_parameters={"master_url": "x", "connect_url": "y"},
+            errorClass="CANNOT_CONFIGURE_SPARK_CONNECT_MASTER",
+            messageParameters={"master_url": "x", "connect_url": "y"},
         )
 
         with unittest.mock.patch.dict(
@@ -425,8 +418,8 @@ class SparkSessionBuilderTests(unittest.TestCase, PySparkErrorTestUtils):
 
             self.check_error(
                 exception=pe2.exception,
-                error_class="CANNOT_CONFIGURE_SPARK_CONNECT",
-                message_parameters={
+                errorClass="CANNOT_CONFIGURE_SPARK_CONNECT",
+                messageParameters={
                     "existing_url": "remote_url",
                     "new_url": "different_remote_url",
                 },
@@ -438,8 +431,8 @@ class SparkSessionBuilderTests(unittest.TestCase, PySparkErrorTestUtils):
 
         self.check_error(
             exception=pe2.exception,
-            error_class="CANNOT_CONFIGURE_SPARK_CONNECT_MASTER",
-            message_parameters={"connect_url": "2", "master_url": "1"},
+            errorClass="CANNOT_CONFIGURE_SPARK_CONNECT_MASTER",
+            messageParameters={"connect_url": "2", "master_url": "1"},
         )
 
         try:
@@ -450,8 +443,8 @@ class SparkSessionBuilderTests(unittest.TestCase, PySparkErrorTestUtils):
 
             self.check_error(
                 exception=pe2.exception,
-                error_class="CANNOT_CONFIGURE_SPARK_CONNECT",
-                message_parameters={
+                errorClass="CANNOT_CONFIGURE_SPARK_CONNECT",
+                messageParameters={
                     "new_url": "1",
                     "existing_url": "2",
                 },
@@ -467,8 +460,8 @@ class SparkSessionBuilderTests(unittest.TestCase, PySparkErrorTestUtils):
 
         self.check_error(
             exception=pe2.exception,
-            error_class="UNSUPPORTED_LOCAL_CONNECTION_STRING",
-            message_parameters={},
+            errorClass="UNSUPPORTED_LOCAL_CONNECTION_STRING",
+            messageParameters={},
         )
 
 
@@ -497,8 +490,8 @@ class SparkSessionProfileTests(unittest.TestCase, PySparkErrorTestUtils):
             self.profile.show(type="invalid")
         self.check_error(
             exception=e.exception,
-            error_class="VALUE_NOT_ALLOWED",
-            message_parameters={
+            errorClass="VALUE_NOT_ALLOWED",
+            messageParameters={
                 "arg_name": "type",
                 "allowed_values": str(["perf", "memory"]),
             },
@@ -524,8 +517,8 @@ class SparkSessionProfileTests(unittest.TestCase, PySparkErrorTestUtils):
             self.profile.dump("path/to/dump", type="invalid")
         self.check_error(
             exception=e.exception,
-            error_class="VALUE_NOT_ALLOWED",
-            message_parameters={
+            errorClass="VALUE_NOT_ALLOWED",
+            messageParameters={
                 "arg_name": "type",
                 "allowed_values": str(["perf", "memory"]),
             },
@@ -551,8 +544,8 @@ class SparkSessionProfileTests(unittest.TestCase, PySparkErrorTestUtils):
             self.profile.clear(type="invalid")
         self.check_error(
             exception=e.exception,
-            error_class="VALUE_NOT_ALLOWED",
-            message_parameters={
+            errorClass="VALUE_NOT_ALLOWED",
+            messageParameters={
                 "arg_name": "type",
                 "allowed_values": str(["perf", "memory"]),
             },

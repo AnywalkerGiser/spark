@@ -44,13 +44,17 @@ See also :class:`SparkSession`.
 .. autosummary::
     :toctree: api/
 
+    SparkSession.addTag
     SparkSession.catalog
+    SparkSession.clearTags
     SparkSession.conf
     SparkSession.createDataFrame
     SparkSession.dataSource
     SparkSession.getActiveSession
+    SparkSession.getTags
     SparkSession.newSession
     SparkSession.profile
+    SparkSession.removeTag
     SparkSession.range
     SparkSession.read
     SparkSession.readStream
@@ -59,6 +63,7 @@ See also :class:`SparkSession`.
     SparkSession.stop
     SparkSession.streams
     SparkSession.table
+    SparkSession.tvf
     SparkSession.udf
     SparkSession.udtf
     SparkSession.version
@@ -78,12 +83,11 @@ Spark Connect Only
 
     SparkSession.addArtifact
     SparkSession.addArtifacts
-    SparkSession.copyFromLocalToFs
+    SparkSession.clearProgressHandlers
     SparkSession.client
+    SparkSession.copyFromLocalToFs
     SparkSession.interruptAll
-    SparkSession.interruptTag
     SparkSession.interruptOperation
-    SparkSession.addTag
-    SparkSession.removeTag
-    SparkSession.getTags
-    SparkSession.clearTags
+    SparkSession.interruptTag
+    SparkSession.registerProgressHandler
+    SparkSession.removeProgressHandler

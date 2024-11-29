@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit
 
 import scala.jdk.CollectionConverters._
 
-import org.scalatest.concurrent.Eventually.eventually
+import org.scalatest.concurrent.Eventually.{eventually, interval}
 import org.scalatest.concurrent.Futures.timeout
 import org.scalatest.time.SpanSugar._
 
@@ -33,16 +33,16 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, ForeachWriter, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, lit, udf, window}
 import org.apache.spark.sql.streaming.StreamingQueryListener.{QueryIdleEvent, QueryProgressEvent, QueryStartedEvent, QueryTerminatedEvent}
-import org.apache.spark.sql.test.{IntegrationTestUtils, QueryTest, SQLHelper}
+import org.apache.spark.sql.test.{IntegrationTestUtils, QueryTest, RemoteSparkSession}
 import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
 import org.apache.spark.util.SparkFileUtils
 
-class ClientStreamingQuerySuite extends QueryTest with SQLHelper with Logging {
+class ClientStreamingQuerySuite extends QueryTest with RemoteSparkSession with Logging {
 
   private val testDataPath = Paths
     .get(
       IntegrationTestUtils.sparkHome,
-      "connector",
+      "sql",
       "connect",
       "common",
       "src",
@@ -269,6 +269,42 @@ class ClientStreamingQuerySuite extends QueryTest with SQLHelper with Logging {
     }
   }
 
+  test("clusterBy") {
+    withSQLConf(
+      "spark.sql.shuffle.partitions" -> "1" // Avoid too many reducers.
+    ) {
+      spark.sql("DROP TABLE IF EXISTS my_table").collect()
+
+      withTempPath { ckpt =>
+        val q1 = spark.readStream
+          .format("rate")
+          .load()
+          .writeStream
+          .clusterBy("value")
+          .option("checkpointLocation", ckpt.getCanonicalPath)
+          .toTable("my_table")
+
+        try {
+          q1.processAllAvailable()
+          eventually(timeout(30.seconds)) {
+            checkAnswer(
+              spark.sql("DESCRIBE my_table"),
+              Seq(
+                Row("timestamp", "timestamp", null),
+                Row("value", "bigint", null),
+                Row("# Clustering Information", "", ""),
+                Row("# col_name", "data_type", "comment"),
+                Row("value", "bigint", null)))
+            assert(spark.table("my_sink").count() > 0)
+          }
+        } finally {
+          q1.stop()
+          spark.sql("DROP TABLE my_table")
+        }
+      }
+    }
+  }
+
   test("throw exception in streaming") {
     try {
       val session = spark
@@ -295,11 +331,9 @@ class ClientStreamingQuerySuite extends QueryTest with SQLHelper with Logging {
         query.awaitTermination()
       }
 
-      assert(exception.getErrorClass != null)
+      assert(exception.getCondition != null)
       assert(exception.getMessageParameters().get("id") == query.id.toString)
       assert(exception.getMessageParameters().get("runId") == query.runId.toString)
-      assert(!exception.getMessageParameters().get("startOffset").isEmpty)
-      assert(!exception.getMessageParameters().get("endOffset").isEmpty)
       assert(exception.getCause.isInstanceOf[SparkException])
       assert(exception.getCause.getCause.isInstanceOf[SparkException])
       assert(
@@ -335,11 +369,9 @@ class ClientStreamingQuerySuite extends QueryTest with SQLHelper with Logging {
       spark.streams.awaitAnyTermination()
     }
 
-    assert(exception.getErrorClass != null)
+    assert(exception.getCondition != null)
     assert(exception.getMessageParameters().get("id") == query.id.toString)
     assert(exception.getMessageParameters().get("runId") == query.runId.toString)
-    assert(!exception.getMessageParameters().get("startOffset").isEmpty)
-    assert(!exception.getMessageParameters().get("endOffset").isEmpty)
     assert(exception.getCause.isInstanceOf[SparkException])
     assert(exception.getCause.getCause.isInstanceOf[SparkException])
     assert(
@@ -475,7 +507,7 @@ class ClientStreamingQuerySuite extends QueryTest with SQLHelper with Logging {
     } finally {
       q.stop()
 
-      eventually(timeout(30.seconds)) {
+      eventually(timeout(60.seconds), interval(1.seconds)) {
         assert(!q.isActive)
         assert(!spark.table(s"listener_terminated_events$tablePostfix").toDF().isEmpty)
       }
@@ -506,6 +538,33 @@ class ClientStreamingQuerySuite extends QueryTest with SQLHelper with Logging {
     // Remove the listener, length should be 1.
     spark.streams.removeListener(listener)
     assert(spark.streams.listListeners().length == 0)
+  }
+
+  test("listener events") {
+    val listener = new MyListener()
+    spark.streams.addListener(listener)
+
+    val q = spark.readStream
+      .format("rate")
+      .load()
+      .writeStream
+      .format("console")
+      .start()
+
+    try {
+      q.processAllAvailable()
+      eventually(timeout(30.seconds)) {
+        assert(q.isActive)
+        assert(listener.start.length == 1)
+        assert(listener.progress.nonEmpty)
+      }
+    } finally {
+      q.stop()
+      eventually(timeout(60.seconds), interval(1.seconds)) {
+        assert(!q.isActive)
+        assert(listener.terminate.nonEmpty)
+      }
+    }
   }
 
   test("foreachBatch") {
@@ -543,6 +602,78 @@ class ClientStreamingQuerySuite extends QueryTest with SQLHelper with Logging {
       q.stop()
     }
   }
+
+  abstract class EventCollector extends StreamingQueryListener {
+    protected def tablePostfix: String
+
+    protected def handleOnQueryStarted(event: QueryStartedEvent): Unit = {
+      val df = spark.createDataFrame(Seq((event.json, 0)))
+      df.write.mode("append").saveAsTable(s"listener_start_events$tablePostfix")
+    }
+
+    protected def handleOnQueryProgress(event: QueryProgressEvent): Unit = {
+      val df = spark.createDataFrame(Seq((event.json, 0)))
+      df.write.mode("append").saveAsTable(s"listener_progress_events$tablePostfix")
+    }
+
+    protected def handleOnQueryTerminated(event: QueryTerminatedEvent): Unit = {
+      val df = spark.createDataFrame(Seq((event.json, 0)))
+      df.write.mode("append").saveAsTable(s"listener_terminated_events$tablePostfix")
+    }
+  }
+
+  /**
+   * V1: Initial interface of StreamingQueryListener containing methods `onQueryStarted`,
+   * `onQueryProgress`, `onQueryTerminated`. It is prior to Spark 3.5.
+   */
+  class EventCollectorV1 extends EventCollector {
+    override protected def tablePostfix: String = "_v1"
+
+    override def onQueryStarted(event: QueryStartedEvent): Unit = handleOnQueryStarted(event)
+
+    override def onQueryProgress(event: QueryProgressEvent): Unit = handleOnQueryProgress(event)
+
+    override def onQueryTerminated(event: QueryTerminatedEvent): Unit =
+      handleOnQueryTerminated(event)
+  }
+
+  /**
+   * V2: The interface after the method `onQueryIdle` is added. It is Spark 3.5+.
+   */
+  class EventCollectorV2 extends EventCollector {
+    override protected def tablePostfix: String = "_v2"
+
+    override def onQueryStarted(event: QueryStartedEvent): Unit = handleOnQueryStarted(event)
+
+    override def onQueryProgress(event: QueryProgressEvent): Unit = handleOnQueryProgress(event)
+
+    override def onQueryIdle(event: QueryIdleEvent): Unit = {}
+
+    override def onQueryTerminated(event: QueryTerminatedEvent): Unit =
+      handleOnQueryTerminated(event)
+  }
+
+  class MyListener extends StreamingQueryListener {
+    var start: Seq[String] = Seq.empty
+    var progress: Seq[String] = Seq.empty
+    var terminate: Seq[String] = Seq.empty
+
+    override def onQueryStarted(event: QueryStartedEvent): Unit = {
+      start = start :+ event.json
+    }
+
+    override def onQueryProgress(event: QueryProgressEvent): Unit = {
+      progress = progress :+ event.json
+    }
+
+    override def onQueryIdle(event: QueryIdleEvent): Unit = {
+      // Do nothing
+    }
+
+    override def onQueryTerminated(event: QueryTerminatedEvent): Unit = {
+      terminate = terminate :+ event.json
+    }
+  }
 }
 
 class TestForeachWriter[T] extends ForeachWriter[T] {
@@ -568,58 +699,6 @@ class TestForeachWriter[T] extends ForeachWriter[T] {
 
 case class TestClass(value: Int) {
   override def toString: String = value.toString
-}
-
-abstract class EventCollector extends StreamingQueryListener {
-  private lazy val spark = SparkSession.builder().getOrCreate()
-
-  protected def tablePostfix: String
-
-  protected def handleOnQueryStarted(event: QueryStartedEvent): Unit = {
-    val df = spark.createDataFrame(Seq((event.json, 0)))
-    df.write.mode("append").saveAsTable(s"listener_start_events$tablePostfix")
-  }
-
-  protected def handleOnQueryProgress(event: QueryProgressEvent): Unit = {
-    val df = spark.createDataFrame(Seq((event.json, 0)))
-    df.write.mode("append").saveAsTable(s"listener_progress_events$tablePostfix")
-  }
-
-  protected def handleOnQueryTerminated(event: QueryTerminatedEvent): Unit = {
-    val df = spark.createDataFrame(Seq((event.json, 0)))
-    df.write.mode("append").saveAsTable(s"listener_terminated_events$tablePostfix")
-  }
-}
-
-/**
- * V1: Initial interface of StreamingQueryListener containing methods `onQueryStarted`,
- * `onQueryProgress`, `onQueryTerminated`. It is prior to Spark 3.5.
- */
-class EventCollectorV1 extends EventCollector {
-  override protected def tablePostfix: String = "_v1"
-
-  override def onQueryStarted(event: QueryStartedEvent): Unit = handleOnQueryStarted(event)
-
-  override def onQueryProgress(event: QueryProgressEvent): Unit = handleOnQueryProgress(event)
-
-  override def onQueryTerminated(event: QueryTerminatedEvent): Unit =
-    handleOnQueryTerminated(event)
-}
-
-/**
- * V2: The interface after the method `onQueryIdle` is added. It is Spark 3.5+.
- */
-class EventCollectorV2 extends EventCollector {
-  override protected def tablePostfix: String = "_v2"
-
-  override def onQueryStarted(event: QueryStartedEvent): Unit = handleOnQueryStarted(event)
-
-  override def onQueryProgress(event: QueryProgressEvent): Unit = handleOnQueryProgress(event)
-
-  override def onQueryIdle(event: QueryIdleEvent): Unit = {}
-
-  override def onQueryTerminated(event: QueryTerminatedEvent): Unit =
-    handleOnQueryTerminated(event)
 }
 
 class ForeachBatchFn(val viewName: String)

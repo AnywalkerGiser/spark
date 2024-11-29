@@ -33,14 +33,14 @@ class MemoryStateStore extends StateStore() {
   override def createColFamilyIfAbsent(
       colFamilyName: String,
       keySchema: StructType,
-      numColsPrefixKey: Int,
       valueSchema: StructType,
+      keyStateEncoderSpec: KeyStateEncoderSpec,
       useMultipleValuesPerKey: Boolean = false,
       isInternal: Boolean = false): Unit = {
     throw StateStoreErrors.multipleColumnFamiliesNotSupported("MemoryStateStoreProvider")
   }
 
-  override def removeColFamilyIfExists(colFamilyName: String): Unit = {
+  override def removeColFamilyIfExists(colFamilyName: String): Boolean = {
     throw StateStoreErrors.removingColumnFamiliesNotSupported("MemoryStateStoreProvider")
   }
 
@@ -73,5 +73,9 @@ class MemoryStateStore extends StateStore() {
 
   override def valuesIterator(key: UnsafeRow, colFamilyName: String): Iterator[UnsafeRow] = {
     throw new UnsupportedOperationException("Doesn't support multiple values per key")
+  }
+
+  override def getStateStoreCheckpointInfo(): StateStoreCheckpointInfo = {
+    StateStoreCheckpointInfo(id.partitionId, version + 1, None, None)
   }
 }

@@ -99,6 +99,11 @@ class Command(google.protobuf.message.Message):
     STREAMING_QUERY_MANAGER_COMMAND_FIELD_NUMBER: builtins.int
     REGISTER_TABLE_FUNCTION_FIELD_NUMBER: builtins.int
     STREAMING_QUERY_LISTENER_BUS_COMMAND_FIELD_NUMBER: builtins.int
+    REGISTER_DATA_SOURCE_FIELD_NUMBER: builtins.int
+    CREATE_RESOURCE_PROFILE_COMMAND_FIELD_NUMBER: builtins.int
+    CHECKPOINT_COMMAND_FIELD_NUMBER: builtins.int
+    REMOVE_CACHED_REMOTE_RELATION_COMMAND_FIELD_NUMBER: builtins.int
+    MERGE_INTO_TABLE_COMMAND_FIELD_NUMBER: builtins.int
     EXTENSION_FIELD_NUMBER: builtins.int
     @property
     def register_function(
@@ -127,6 +132,20 @@ class Command(google.protobuf.message.Message):
     @property
     def streaming_query_listener_bus_command(self) -> global___StreamingQueryListenerBusCommand: ...
     @property
+    def register_data_source(
+        self,
+    ) -> pyspark.sql.connect.proto.relations_pb2.CommonInlineUserDefinedDataSource: ...
+    @property
+    def create_resource_profile_command(self) -> global___CreateResourceProfileCommand: ...
+    @property
+    def checkpoint_command(self) -> global___CheckpointCommand: ...
+    @property
+    def remove_cached_remote_relation_command(
+        self,
+    ) -> global___RemoveCachedRemoteRelationCommand: ...
+    @property
+    def merge_into_table_command(self) -> global___MergeIntoTableCommand: ...
+    @property
     def extension(self) -> google.protobuf.any_pb2.Any:
         """This field is used to mark extensions to the protocol. When plugins generate arbitrary
         Commands they can add them here. During the planning the correct resolution is done.
@@ -148,23 +167,40 @@ class Command(google.protobuf.message.Message):
         | None = ...,
         streaming_query_listener_bus_command: global___StreamingQueryListenerBusCommand
         | None = ...,
+        register_data_source: pyspark.sql.connect.proto.relations_pb2.CommonInlineUserDefinedDataSource
+        | None = ...,
+        create_resource_profile_command: global___CreateResourceProfileCommand | None = ...,
+        checkpoint_command: global___CheckpointCommand | None = ...,
+        remove_cached_remote_relation_command: global___RemoveCachedRemoteRelationCommand
+        | None = ...,
+        merge_into_table_command: global___MergeIntoTableCommand | None = ...,
         extension: google.protobuf.any_pb2.Any | None = ...,
     ) -> None: ...
     def HasField(
         self,
         field_name: typing_extensions.Literal[
+            "checkpoint_command",
+            b"checkpoint_command",
             "command_type",
             b"command_type",
             "create_dataframe_view",
             b"create_dataframe_view",
+            "create_resource_profile_command",
+            b"create_resource_profile_command",
             "extension",
             b"extension",
             "get_resources_command",
             b"get_resources_command",
+            "merge_into_table_command",
+            b"merge_into_table_command",
+            "register_data_source",
+            b"register_data_source",
             "register_function",
             b"register_function",
             "register_table_function",
             b"register_table_function",
+            "remove_cached_remote_relation_command",
+            b"remove_cached_remote_relation_command",
             "sql_command",
             b"sql_command",
             "streaming_query_command",
@@ -184,18 +220,28 @@ class Command(google.protobuf.message.Message):
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
+            "checkpoint_command",
+            b"checkpoint_command",
             "command_type",
             b"command_type",
             "create_dataframe_view",
             b"create_dataframe_view",
+            "create_resource_profile_command",
+            b"create_resource_profile_command",
             "extension",
             b"extension",
             "get_resources_command",
             b"get_resources_command",
+            "merge_into_table_command",
+            b"merge_into_table_command",
+            "register_data_source",
+            b"register_data_source",
             "register_function",
             b"register_function",
             "register_table_function",
             b"register_table_function",
+            "remove_cached_remote_relation_command",
+            b"remove_cached_remote_relation_command",
             "sql_command",
             b"sql_command",
             "streaming_query_command",
@@ -227,6 +273,11 @@ class Command(google.protobuf.message.Message):
             "streaming_query_manager_command",
             "register_table_function",
             "streaming_query_listener_bus_command",
+            "register_data_source",
+            "create_resource_profile_command",
+            "checkpoint_command",
+            "remove_cached_remote_relation_command",
+            "merge_into_table_command",
             "extension",
         ]
         | None
@@ -292,6 +343,7 @@ class SqlCommand(google.protobuf.message.Message):
     POS_ARGS_FIELD_NUMBER: builtins.int
     NAMED_ARGUMENTS_FIELD_NUMBER: builtins.int
     POS_ARGUMENTS_FIELD_NUMBER: builtins.int
+    INPUT_FIELD_NUMBER: builtins.int
     sql: builtins.str
     """(Required) SQL Query."""
     @property
@@ -326,6 +378,9 @@ class SqlCommand(google.protobuf.message.Message):
         """(Optional) A sequence of expressions for positional parameters in the SQL query text.
         It cannot coexist with `named_arguments`.
         """
+    @property
+    def input(self) -> pyspark.sql.connect.proto.relations_pb2.Relation:
+        """(Optional) The relation that this SQL command will be built on."""
     def __init__(
         self,
         *,
@@ -346,12 +401,18 @@ class SqlCommand(google.protobuf.message.Message):
             pyspark.sql.connect.proto.expressions_pb2.Expression
         ]
         | None = ...,
+        input: pyspark.sql.connect.proto.relations_pb2.Relation | None = ...,
     ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["input", b"input"]
+    ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
             "args",
             b"args",
+            "input",
+            b"input",
             "named_arguments",
             b"named_arguments",
             "pos_args",
@@ -844,6 +905,7 @@ class WriteStreamOperationStart(google.protobuf.message.Message):
     TABLE_NAME_FIELD_NUMBER: builtins.int
     FOREACH_WRITER_FIELD_NUMBER: builtins.int
     FOREACH_BATCH_FIELD_NUMBER: builtins.int
+    CLUSTERING_COLUMN_NAMES_FIELD_NUMBER: builtins.int
     @property
     def input(self) -> pyspark.sql.connect.proto.relations_pb2.Relation:
         """(Required) The output of the `input` streaming relation will be written."""
@@ -871,6 +933,11 @@ class WriteStreamOperationStart(google.protobuf.message.Message):
     def foreach_writer(self) -> global___StreamingForeachFunction: ...
     @property
     def foreach_batch(self) -> global___StreamingForeachFunction: ...
+    @property
+    def clustering_column_names(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedScalarFieldContainer[builtins.str]:
+        """(Optional) Columns used for clustering the table."""
     def __init__(
         self,
         *,
@@ -888,6 +955,7 @@ class WriteStreamOperationStart(google.protobuf.message.Message):
         table_name: builtins.str = ...,
         foreach_writer: global___StreamingForeachFunction | None = ...,
         foreach_batch: global___StreamingForeachFunction | None = ...,
+        clustering_column_names: collections.abc.Iterable[builtins.str] | None = ...,
     ) -> None: ...
     def HasField(
         self,
@@ -921,6 +989,8 @@ class WriteStreamOperationStart(google.protobuf.message.Message):
         field_name: typing_extensions.Literal[
             "available_now",
             b"available_now",
+            "clustering_column_names",
+            b"clustering_column_names",
             "continuous_checkpoint_interval",
             b"continuous_checkpoint_interval",
             "foreach_batch",
@@ -2048,3 +2118,214 @@ class GetResourcesCommandResult(google.protobuf.message.Message):
     ) -> None: ...
 
 global___GetResourcesCommandResult = GetResourcesCommandResult
+
+class CreateResourceProfileCommand(google.protobuf.message.Message):
+    """Command to create ResourceProfile"""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    PROFILE_FIELD_NUMBER: builtins.int
+    @property
+    def profile(self) -> pyspark.sql.connect.proto.common_pb2.ResourceProfile:
+        """(Required) The ResourceProfile to be built on the server-side."""
+    def __init__(
+        self,
+        *,
+        profile: pyspark.sql.connect.proto.common_pb2.ResourceProfile | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["profile", b"profile"]
+    ) -> builtins.bool: ...
+    def ClearField(self, field_name: typing_extensions.Literal["profile", b"profile"]) -> None: ...
+
+global___CreateResourceProfileCommand = CreateResourceProfileCommand
+
+class CreateResourceProfileCommandResult(google.protobuf.message.Message):
+    """Response for command 'CreateResourceProfileCommand'."""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    PROFILE_ID_FIELD_NUMBER: builtins.int
+    profile_id: builtins.int
+    """(Required) Server-side generated resource profile id."""
+    def __init__(
+        self,
+        *,
+        profile_id: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["profile_id", b"profile_id"]
+    ) -> None: ...
+
+global___CreateResourceProfileCommandResult = CreateResourceProfileCommandResult
+
+class RemoveCachedRemoteRelationCommand(google.protobuf.message.Message):
+    """Command to remove `CashedRemoteRelation`"""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    RELATION_FIELD_NUMBER: builtins.int
+    @property
+    def relation(self) -> pyspark.sql.connect.proto.relations_pb2.CachedRemoteRelation:
+        """(Required) The remote to be related"""
+    def __init__(
+        self,
+        *,
+        relation: pyspark.sql.connect.proto.relations_pb2.CachedRemoteRelation | None = ...,
+    ) -> None: ...
+    def HasField(
+        self, field_name: typing_extensions.Literal["relation", b"relation"]
+    ) -> builtins.bool: ...
+    def ClearField(
+        self, field_name: typing_extensions.Literal["relation", b"relation"]
+    ) -> None: ...
+
+global___RemoveCachedRemoteRelationCommand = RemoveCachedRemoteRelationCommand
+
+class CheckpointCommand(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    RELATION_FIELD_NUMBER: builtins.int
+    LOCAL_FIELD_NUMBER: builtins.int
+    EAGER_FIELD_NUMBER: builtins.int
+    STORAGE_LEVEL_FIELD_NUMBER: builtins.int
+    @property
+    def relation(self) -> pyspark.sql.connect.proto.relations_pb2.Relation:
+        """(Required) The logical plan to checkpoint."""
+    local: builtins.bool
+    """(Required) Locally checkpoint using a local temporary
+    directory in Spark Connect server (Spark Driver)
+    """
+    eager: builtins.bool
+    """(Required) Whether to checkpoint this dataframe immediately."""
+    @property
+    def storage_level(self) -> pyspark.sql.connect.proto.common_pb2.StorageLevel:
+        """(Optional) For local checkpoint, the storage level to use."""
+    def __init__(
+        self,
+        *,
+        relation: pyspark.sql.connect.proto.relations_pb2.Relation | None = ...,
+        local: builtins.bool = ...,
+        eager: builtins.bool = ...,
+        storage_level: pyspark.sql.connect.proto.common_pb2.StorageLevel | None = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "_storage_level",
+            b"_storage_level",
+            "relation",
+            b"relation",
+            "storage_level",
+            b"storage_level",
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "_storage_level",
+            b"_storage_level",
+            "eager",
+            b"eager",
+            "local",
+            b"local",
+            "relation",
+            b"relation",
+            "storage_level",
+            b"storage_level",
+        ],
+    ) -> None: ...
+    def WhichOneof(
+        self, oneof_group: typing_extensions.Literal["_storage_level", b"_storage_level"]
+    ) -> typing_extensions.Literal["storage_level"] | None: ...
+
+global___CheckpointCommand = CheckpointCommand
+
+class MergeIntoTableCommand(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    TARGET_TABLE_NAME_FIELD_NUMBER: builtins.int
+    SOURCE_TABLE_PLAN_FIELD_NUMBER: builtins.int
+    MERGE_CONDITION_FIELD_NUMBER: builtins.int
+    MATCH_ACTIONS_FIELD_NUMBER: builtins.int
+    NOT_MATCHED_ACTIONS_FIELD_NUMBER: builtins.int
+    NOT_MATCHED_BY_SOURCE_ACTIONS_FIELD_NUMBER: builtins.int
+    WITH_SCHEMA_EVOLUTION_FIELD_NUMBER: builtins.int
+    target_table_name: builtins.str
+    """(Required) The name of the target table."""
+    @property
+    def source_table_plan(self) -> pyspark.sql.connect.proto.relations_pb2.Relation:
+        """(Required) The relation of the source table."""
+    @property
+    def merge_condition(self) -> pyspark.sql.connect.proto.expressions_pb2.Expression:
+        """(Required) The condition to match the source and target."""
+    @property
+    def match_actions(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        pyspark.sql.connect.proto.expressions_pb2.Expression
+    ]:
+        """(Optional) The actions to be taken when the condition is matched."""
+    @property
+    def not_matched_actions(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        pyspark.sql.connect.proto.expressions_pb2.Expression
+    ]:
+        """(Optional) The actions to be taken when the condition is not matched."""
+    @property
+    def not_matched_by_source_actions(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        pyspark.sql.connect.proto.expressions_pb2.Expression
+    ]:
+        """(Optional) The actions to be taken when the condition is not matched by source."""
+    with_schema_evolution: builtins.bool
+    """(Required) Whether to enable schema evolution."""
+    def __init__(
+        self,
+        *,
+        target_table_name: builtins.str = ...,
+        source_table_plan: pyspark.sql.connect.proto.relations_pb2.Relation | None = ...,
+        merge_condition: pyspark.sql.connect.proto.expressions_pb2.Expression | None = ...,
+        match_actions: collections.abc.Iterable[
+            pyspark.sql.connect.proto.expressions_pb2.Expression
+        ]
+        | None = ...,
+        not_matched_actions: collections.abc.Iterable[
+            pyspark.sql.connect.proto.expressions_pb2.Expression
+        ]
+        | None = ...,
+        not_matched_by_source_actions: collections.abc.Iterable[
+            pyspark.sql.connect.proto.expressions_pb2.Expression
+        ]
+        | None = ...,
+        with_schema_evolution: builtins.bool = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "merge_condition", b"merge_condition", "source_table_plan", b"source_table_plan"
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "match_actions",
+            b"match_actions",
+            "merge_condition",
+            b"merge_condition",
+            "not_matched_actions",
+            b"not_matched_actions",
+            "not_matched_by_source_actions",
+            b"not_matched_by_source_actions",
+            "source_table_plan",
+            b"source_table_plan",
+            "target_table_name",
+            b"target_table_name",
+            "with_schema_evolution",
+            b"with_schema_evolution",
+        ],
+    ) -> None: ...
+
+global___MergeIntoTableCommand = MergeIntoTableCommand

@@ -100,8 +100,8 @@ class RuntimeConf:
             return False
         else:
             raise PySparkValueError(
-                error_class="VALUE_NOT_ALLOWED",
-                message_parameters={"arg_name": "result", "allowed_values": "'true' or 'false'"},
+                errorClass="VALUE_NOT_ALLOWED",
+                messageParameters={"arg_name": "result", "allowed_values": "'true' or 'false'"},
             )
 
     isModifiable.__doc__ = PySparkRuntimeConfig.isModifiable.__doc__
@@ -110,8 +110,8 @@ class RuntimeConf:
         """Assert that an object is of type str."""
         if not isinstance(obj, str):
             raise PySparkTypeError(
-                error_class="NOT_STR",
-                message_parameters={
+                errorClass="NOT_STR",
+                messageParameters={
                     "arg_name": identifier,
                     "arg_type": type(obj).__name__,
                 },
@@ -122,6 +122,7 @@ RuntimeConf.__doc__ = PySparkRuntimeConfig.__doc__
 
 
 def _test() -> None:
+    import os
     import sys
     import doctest
     from pyspark.sql import SparkSession as PySparkSession
@@ -129,7 +130,9 @@ def _test() -> None:
 
     globs = pyspark.sql.connect.conf.__dict__.copy()
     globs["spark"] = (
-        PySparkSession.builder.appName("sql.connect.conf tests").remote("local[4]").getOrCreate()
+        PySparkSession.builder.appName("sql.connect.conf tests")
+        .remote(os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "local[4]"))
+        .getOrCreate()
     )
 
     (failure_count, test_count) = doctest.testmod(

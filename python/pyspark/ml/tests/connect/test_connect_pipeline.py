@@ -15,27 +15,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+import os
 import unittest
 
+from pyspark.util import is_remote_only
 from pyspark.sql import SparkSession
 from pyspark.testing.connectutils import should_test_connect, connect_requirement_message
+from pyspark.testing.utils import have_torch, torch_requirement_message
+
 
 if should_test_connect:
     from pyspark.ml.tests.connect.test_legacy_mode_pipeline import PipelineTestsMixin
 
+    @unittest.skipIf(
+        not should_test_connect or not have_torch or is_remote_only(),
+        connect_requirement_message
+        or torch_requirement_message
+        or "Requires PySpark core library in Spark Connect server",
+    )
+    class PipelineTestsOnConnect(PipelineTestsMixin, unittest.TestCase):
+        def setUp(self) -> None:
+            self.spark = (
+                SparkSession.builder.remote(
+                    os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "local[2]")
+                )
+                .config("spark.sql.artifact.copyFromLocalToFs.allowDestLocal", "true")
+                .getOrCreate()
+            )
 
-@unittest.skipIf(not should_test_connect, connect_requirement_message)
-class PipelineTestsOnConnect(PipelineTestsMixin, unittest.TestCase):
-    def setUp(self) -> None:
-        self.spark = (
-            SparkSession.builder.remote("local[2]")
-            .config("spark.sql.artifact.copyFromLocalToFs.allowDestLocal", "true")
-            .getOrCreate()
-        )
-
-    def tearDown(self) -> None:
-        self.spark.stop()
+        def tearDown(self) -> None:
+            self.spark.stop()
 
 
 if __name__ == "__main__":

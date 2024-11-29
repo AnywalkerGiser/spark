@@ -20,16 +20,16 @@ import tempfile
 import unittest
 import os
 
-from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+from pyspark.util import is_remote_only
 from pyspark.sql import SparkSession
 from pyspark.testing.connectutils import ReusedConnectTestCase, should_test_connect
 from pyspark.testing.utils import SPARK_HOME
-from pyspark import SparkFiles
-from pyspark.sql.functions import udf
+from pyspark.sql.functions import udf, assert_true, lit
 
 if should_test_connect:
     from pyspark.sql.connect.client.artifact import ArtifactManager
     from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
 
 
 class ArtifactTestsMixin:
@@ -46,7 +46,7 @@ class ArtifactTestsMixin:
                 return my_pyfile.my_func()
 
             spark_session.addArtifacts(pyfile_path, pyfile=True)
-            self.assertEqual(spark_session.range(1).select(func("id")).first()[0], 10)
+            spark_session.range(1).select(assert_true(func("id") == lit(10))).show()
 
     def test_add_pyfile(self):
         self.check_add_pyfile(self.spark)
@@ -94,7 +94,7 @@ class ArtifactTestsMixin:
                 return my_zipfile.my_func()
 
             spark_session.addArtifacts(f"{package_path}.zip", pyfile=True)
-            self.assertEqual(spark_session.range(1).select(func("id")).first()[0], 5)
+            spark_session.range(1).select(assert_true(func("id") == lit(5))).show()
 
     def test_add_zipped_package(self):
         self.check_add_zipped_package(self.spark)
@@ -130,7 +130,7 @@ class ArtifactTestsMixin:
                 ) as my_file:
                     return my_file.read().strip()
 
-            self.assertEqual(spark_session.range(1).select(func("id")).first()[0], "hello world!")
+            spark_session.range(1).select(assert_true(func("id") == lit("hello world!"))).show()
 
     def test_add_archive(self):
         self.check_add_archive(self.spark)
@@ -160,7 +160,7 @@ class ArtifactTestsMixin:
                 with open(os.path.join(root, "my_file.txt"), "r") as my_file:
                     return my_file.read().strip()
 
-            self.assertEqual(spark_session.range(1).select(func("id")).first()[0], "Hello world!!")
+            spark_session.range(1).select(assert_true(func("id") == lit("Hello world!!"))).show()
 
     def test_add_file(self):
         self.check_add_file(self.spark)
@@ -174,9 +174,12 @@ class ArtifactTestsMixin:
         )
 
 
+@unittest.skipIf(is_remote_only(), "Requires JVM access")
 class ArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
     @classmethod
     def root(cls):
+        from pyspark.core.files import SparkFiles
+
         # In local mode, the file location is the same as Driver
         # The executors are running in a thread.
         jvm = SparkSession._instantiatedSession._jvm
@@ -422,32 +425,3 @@ class ArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
                 self.artifact_manager.add_artifacts(
                     os.path.join(d, "not_existing"), file=True, pyfile=False, archive=False
                 )
-
-
-class LocalClusterArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
-    @classmethod
-    def conf(cls):
-        return (
-            super().conf().set("spark.driver.memory", "512M").set("spark.executor.memory", "512M")
-        )
-
-    @classmethod
-    def root(cls):
-        # In local cluster, we can mimic the production usage.
-        return "."
-
-    @classmethod
-    def master(cls):
-        return "local-cluster[2,2,512]"
-
-
-if __name__ == "__main__":
-    from pyspark.sql.tests.connect.client.test_artifact import *  # noqa: F401
-
-    try:
-        import xmlrunner  # type: ignore
-
-        testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
-    except ImportError:
-        testRunner = None
-    unittest.main(testRunner=testRunner, verbosity=2)

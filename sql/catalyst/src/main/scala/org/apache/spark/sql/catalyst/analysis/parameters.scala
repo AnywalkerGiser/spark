@@ -19,9 +19,9 @@ package org.apache.spark.sql.catalyst.analysis
 
 import org.apache.spark.SparkException
 import org.apache.spark.sql.catalyst.expressions.{Alias, CreateArray, CreateMap, CreateNamedStruct, Expression, LeafExpression, Literal, MapFromArrays, MapFromEntries, SubqueryExpression, Unevaluable, VariableReference}
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, SupervisingCommand}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.catalyst.trees.TreePattern.{PARAMETER, PARAMETERIZED_QUERY, TreePattern, UNRESOLVED_WITH}
+import org.apache.spark.sql.catalyst.trees.TreePattern.{COMMAND, PARAMETER, PARAMETERIZED_QUERY, TreePattern, UNRESOLVED_IDENTIFIER_WITH_CTE, UNRESOLVED_WITH}
 import org.apache.spark.sql.errors.QueryErrorsBase
 import org.apache.spark.sql.types.DataType
 
@@ -105,11 +105,63 @@ case class PosParameterizedQuery(child: LogicalPlan, args: Seq[Expression])
 }
 
 /**
+ * Base class for rules that process parameterized queries.
+ */
+abstract class ParameterizedQueryProcessor extends Rule[LogicalPlan] {
+  def assertUnresolvedPlanHasSingleParameterizedQuery(plan: LogicalPlan): Unit = {
+    if (plan.containsPattern(PARAMETERIZED_QUERY)) {
+      val parameterizedQueries = plan.collect { case p: ParameterizedQuery => p }
+      assert(parameterizedQueries.length == 1)
+    }
+  }
+}
+
+/**
+ * Moves `ParameterizedQuery` inside `SupervisingCommand` for their supervised plans to be
+ * resolved later by the analyzer.
+ *
+ * - Basic case:
+ * `PosParameterizedQuery(ExplainCommand(SomeQuery(...)))` =>
+ * `ExplainCommand(PosParameterizedQuery(SomeQuery(...)))`
+ * - Nested `SupervisedCommand`s are handled recursively:
+ * `PosParameterizedQuery(ExplainCommand(ExplainCommand(SomeQuery(...))))` =>
+ * `ExplainCommand(ExplainCommand(PosParameterizedQuery(SomeQuery(...))))`
+ */
+object MoveParameterizedQueriesDown extends ParameterizedQueryProcessor {
+  override def apply(plan: LogicalPlan): LogicalPlan = {
+    assertUnresolvedPlanHasSingleParameterizedQuery(plan)
+
+    plan.resolveOperatorsWithPruning(_.containsPattern(PARAMETERIZED_QUERY)) {
+      case pq: ParameterizedQuery if pq.exists(isSupervisingCommand) =>
+        moveParameterizedQueryIntoSupervisingCommand(pq)
+    }
+  }
+
+  private def moveParameterizedQueryIntoSupervisingCommand(pq: ParameterizedQuery): LogicalPlan = {
+    // Moves parameterized query down recursively to handle nested `SupervisingCommand`s
+    def transformSupervisedPlan: PartialFunction[LogicalPlan, LogicalPlan] = {
+      case command: SupervisingCommand =>
+        command.withTransformedSupervisedPlan {
+          transformSupervisedPlan(_)
+        }
+      case plan => pq.withNewChildren(Seq(plan))
+    }
+
+    pq.child.resolveOperatorsWithPruning(_.containsPattern(COMMAND)) {
+      case command: SupervisingCommand => transformSupervisedPlan(command)
+    }
+  }
+
+  private def isSupervisingCommand(plan: LogicalPlan): Boolean =
+    plan.containsPattern(COMMAND) && plan.isInstanceOf[SupervisingCommand]
+}
+
+/**
  * Finds all named parameters in `ParameterizedQuery` and substitutes them by literals or
  * by collection constructor functions such as `map()`, `array()`, `struct()`
  * from the user-specified arguments.
  */
-object BindParameters extends Rule[LogicalPlan] with QueryErrorsBase {
+object BindParameters extends ParameterizedQueryProcessor with QueryErrorsBase {
   private def checkArgs(args: Iterable[(String, Expression)]): Unit = {
     def isNotAllowed(expr: Expression): Boolean = expr.exists {
       case _: Literal | _: CreateArray | _: CreateNamedStruct |
@@ -131,17 +183,14 @@ object BindParameters extends Rule[LogicalPlan] with QueryErrorsBase {
   }
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
-    if (plan.containsPattern(PARAMETERIZED_QUERY)) {
-      // One unresolved plan can have at most one ParameterizedQuery.
-      val parameterizedQueries = plan.collect { case p: ParameterizedQuery => p }
-      assert(parameterizedQueries.length == 1)
-    }
+    assertUnresolvedPlanHasSingleParameterizedQuery(plan)
 
     plan.resolveOperatorsWithPruning(_.containsPattern(PARAMETERIZED_QUERY)) {
       // We should wait for `CTESubstitution` to resolve CTE before binding parameters, as CTE
       // relations are not children of `UnresolvedWith`.
       case NameParameterizedQuery(child, argNames, argValues)
-        if !child.containsPattern(UNRESOLVED_WITH) && argValues.forall(_.resolved) =>
+        if !child.containsAnyPattern(UNRESOLVED_WITH, UNRESOLVED_IDENTIFIER_WITH_CTE) &&
+          argValues.forall(_.resolved) =>
         if (argNames.length != argValues.length) {
           throw SparkException.internalError(s"The number of argument names ${argNames.length} " +
             s"must be equal to the number of argument values ${argValues.length}.")
@@ -151,7 +200,8 @@ object BindParameters extends Rule[LogicalPlan] with QueryErrorsBase {
         bind(child) { case NamedParameter(name) if args.contains(name) => args(name) }
 
       case PosParameterizedQuery(child, args)
-        if !child.containsPattern(UNRESOLVED_WITH) && args.forall(_.resolved) =>
+        if !child.containsAnyPattern(UNRESOLVED_WITH, UNRESOLVED_IDENTIFIER_WITH_CTE) &&
+          args.forall(_.resolved) =>
         val indexedArgs = args.zipWithIndex
         checkArgs(indexedArgs.map(arg => (s"_${arg._2}", arg._1)))
 
@@ -164,7 +214,7 @@ object BindParameters extends Rule[LogicalPlan] with QueryErrorsBase {
             args(posToIndex(pos))
         }
 
-      case _ => plan
+      case other => other
     }
   }
 }

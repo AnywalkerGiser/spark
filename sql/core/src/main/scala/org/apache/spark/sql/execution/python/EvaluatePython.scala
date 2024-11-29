@@ -24,19 +24,19 @@ import scala.jdk.CollectionConverters._
 
 import net.razorvine.pickle.{IObjectPickler, Opcodes, Pickler}
 
-import org.apache.spark.SparkException
+import org.apache.spark.SparkIllegalArgumentException
 import org.apache.spark.api.python.SerDeUtil
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData, GenericArrayData, MapData}
 import org.apache.spark.sql.types._
-import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.unsafe.types.{UTF8String, VariantVal}
 
 object EvaluatePython {
 
   def needConversionInPython(dt: DataType): Boolean = dt match {
-    case DateType | TimestampType | TimestampNTZType | _: DayTimeIntervalType => true
+    case DateType | TimestampType | TimestampNTZType | VariantType | _: DayTimeIntervalType => true
     case _: StructType => true
     case _: UserDefinedType[_] => true
     case ArrayType(elementType, _) => needConversionInPython(elementType)
@@ -145,7 +145,7 @@ object EvaluatePython {
         case c: Int => c.toLong
       }
 
-    case StringType => (obj: Any) => nullSafeConvert(obj) {
+    case _: StringType => (obj: Any) => nullSafeConvert(obj) {
       case _ => UTF8String.fromString(obj.toString)
     }
 
@@ -183,10 +183,11 @@ object EvaluatePython {
         case c if c.getClass.isArray =>
           val array = c.asInstanceOf[Array[_]]
           if (array.length != fields.length) {
-            throw SparkException.internalError(
-              s"Input row doesn't have expected number of values required by the schema. " +
-              s"${fields.length} fields are required while ${array.length} values are provided."
-            )
+            throw new SparkIllegalArgumentException(
+              errorClass = "STRUCT_ARRAY_LENGTH_MISMATCH",
+              messageParameters = Map(
+                "expected" -> fields.length.toString,
+                "actual" -> array.length.toString))
           }
 
           val row = new GenericInternalRow(fields.length)
@@ -199,6 +200,13 @@ object EvaluatePython {
       }
 
     case udt: UserDefinedType[_] => makeFromJava(udt.sqlType)
+
+    case VariantType => (obj: Any) => nullSafeConvert(obj) {
+      case s: java.util.HashMap[_, _] =>
+        new VariantVal(
+          s.get("value").asInstanceOf[Array[Byte]], s.get("metadata").asInstanceOf[Array[Byte]]
+        )
+    }
 
     case other => (obj: Any) => nullSafeConvert(obj)(PartialFunction.empty)
   }

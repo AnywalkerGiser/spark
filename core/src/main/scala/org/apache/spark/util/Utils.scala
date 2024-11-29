@@ -68,7 +68,9 @@ import org.slf4j.Logger
 
 import org.apache.spark._
 import org.apache.spark.deploy.SparkHadoopUtil
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC, MessageWithContext}
+import org.apache.spark.internal.LogKeys
+import org.apache.spark.internal.LogKeys._
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Streaming._
 import org.apache.spark.internal.config.Tests.IS_TESTING
@@ -399,14 +401,14 @@ private[spark] object Utils
           "Untarring behavior will be deprecated at spark.files and " +
             "SparkContext.addFile. Consider using spark.archives or SparkContext.addArchive " +
             "instead.")
-        logInfo("Untarring " + fileName)
+        logInfo(log"Untarring ${MDC(FILE_NAME, fileName)}")
         executeAndGetOutput(Seq("tar", "-xzf", fileName), targetDir)
       } else if (fileName.endsWith(".tar")) {
         logWarning(
           "Untarring behavior will be deprecated at spark.files and " +
             "SparkContext.addFile. Consider using spark.archives or SparkContext.addArchive " +
             "instead.")
-        logInfo("Untarring " + fileName)
+        logInfo(log"Untarring ${MDC(FILE_NAME, fileName)}")
         executeAndGetOutput(Seq("tar", "-xf", fileName), targetDir)
       }
     }
@@ -443,7 +445,8 @@ private[spark] object Utils
       // TODO(SPARK-38632): should keep file permissions. Java implementation doesn't.
       unTarUsingJava(source, dest)
     } else {
-      logWarning(s"Cannot unpack $source, just copying it to $dest.")
+      logWarning(log"Cannot unpack ${MDC(LogKeys.FILE_NAME, source)}, " +
+        log"just copying it to ${MDC(FILE_NAME2, dest)}.")
       copyRecursive(source, dest)
     }
   }
@@ -500,7 +503,7 @@ private[spark] object Utils
       fileOverwrite: Boolean): Unit = {
     val tempFile = File.createTempFile("fetchFileTemp", null,
       new File(destFile.getParentFile.getAbsolutePath))
-    logInfo(s"Fetching $url to $tempFile")
+    logInfo(log"Fetching ${MDC(LogKeys.URL, url)} to ${MDC(FILE_ABSOLUTE_PATH, tempFile)}")
 
     try {
       val out = new FileOutputStream(tempFile)
@@ -542,7 +545,8 @@ private[spark] object Utils
       if (!filesEqualRecursive(sourceFile, destFile)) {
         if (fileOverwrite) {
           logInfo(
-            s"File $destFile exists and does not match contents of $url, replacing it with $url"
+            log"File ${MDC(DESTINATION_PATH, destFile)} exists and does not match contents of" +
+              log" ${MDC(LogKeys.URL, url)}, replacing it with ${MDC(LogKeys.URL2, url)}"
           )
           if (!destFile.delete()) {
             throw new SparkException(
@@ -560,10 +564,8 @@ private[spark] object Utils
         // Do nothing if the file contents are the same, i.e. this file has been copied
         // previously.
         logInfo(
-          "%s has been previously copied to %s".format(
-            sourceFile.getAbsolutePath,
-            destFile.getAbsolutePath
-          )
+          log"${MDC(SOURCE_PATH, sourceFile.getAbsolutePath)} has been previously" +
+            log" copied to ${MDC(DESTINATION_PATH, destFile.getAbsolutePath)}"
         )
         return
       }
@@ -573,7 +575,8 @@ private[spark] object Utils
     if (removeSourceFile) {
       Files.move(sourceFile.toPath, destFile.toPath)
     } else {
-      logInfo(s"Copying ${sourceFile.getAbsolutePath} to ${destFile.getAbsolutePath}")
+      logInfo(log"Copying ${MDC(SOURCE_PATH, sourceFile.getAbsolutePath)}" +
+        log" to ${MDC(DESTINATION_PATH, destFile.getAbsolutePath)}")
       copyRecursive(sourceFile, destFile)
     }
   }
@@ -635,7 +638,7 @@ private[spark] object Utils
         val is = Channels.newInputStream(source)
         downloadFile(url, is, targetFile, fileOverwrite)
       case "http" | "https" | "ftp" =>
-        val uc = new URL(url).openConnection()
+        val uc = new URI(url).toURL.openConnection()
         val timeoutMs =
           conf.getTimeAsSeconds("spark.files.fetchTimeout", "60s").toInt * 1000
         uc.setConnectTimeout(timeoutMs)
@@ -796,8 +799,10 @@ private[spark] object Utils
     }
     if (uris.nonEmpty) {
       logWarning(
-        "The configured local directories are not expected to be URIs; however, got suspicious " +
-        s"values [${uris.mkString(", ")}]. Please check your configured local directories.")
+        log"The configured local directories are not expected to be URIs; " +
+          log"however, got suspicious values [" +
+          log"${MDC(LogKeys.URIS, uris.mkString(", "))}]. " +
+          log"Please check your configured local directories.")
     }
 
     configuredLocalDirs.flatMap { root =>
@@ -808,12 +813,14 @@ private[spark] object Utils
           chmod700(dir)
           Some(dir.getAbsolutePath)
         } else {
-          logError(s"Failed to create dir in $root. Ignoring this directory.")
+          logError(log"Failed to create dir in ${MDC(PATH, root)}. Ignoring this directory.")
+
           None
         }
       } catch {
         case e: IOException =>
-          logError(s"Failed to create local root dir in $root. Ignoring this directory.")
+          logError(
+            log"Failed to create local root dir in ${MDC(PATH, root)}. Ignoring this directory.")
           None
       }
     }
@@ -886,16 +893,17 @@ private[spark] object Utils
             // because of Inet6Address.toHostName may add interface at the end if it knows about it
             val strippedAddress = InetAddress.getByAddress(addr.getAddress)
             // We've found an address that looks reasonable!
-            logWarning("Your hostname, " + InetAddress.getLocalHost.getHostName + " resolves to" +
-              " a loopback address: " + address.getHostAddress + "; using " +
-              strippedAddress.getHostAddress + " instead (on interface " + ni.getName + ")")
+            logWarning(log"Your hostname, ${MDC(HOST, InetAddress.getLocalHost.getHostName)}, " +
+              log"resolves to a loopback address: ${MDC(HOST_PORT, address.getHostAddress)}; " +
+              log"using ${MDC(HOST_PORT2, strippedAddress.getHostAddress)} instead (on interface " +
+              log"${MDC(NETWORK_IF, ni.getName)})")
             logWarning("Set SPARK_LOCAL_IP if you need to bind to another address")
             return strippedAddress
           }
         }
-        logWarning("Your hostname, " + InetAddress.getLocalHost.getHostName + " resolves to" +
-          " a loopback address: " + address.getHostAddress + ", but we couldn't find any" +
-          " external IP address!")
+        logWarning(log"Your hostname, ${MDC(HOST, InetAddress.getLocalHost.getHostName)}, " +
+          log"resolves to a loopback address: ${MDC(HOST_PORT, address.getHostAddress)}, " +
+          log"but we couldn't find any external IP address!")
         logWarning("Set SPARK_LOCAL_IP if you need to bind to another address")
       }
       address
@@ -1194,7 +1202,7 @@ private[spark] object Utils
     val process = builder.start()
     if (redirectStderr) {
       val threadName = "redirect stderr for command " + command(0)
-      def log(s: String): Unit = logInfo(s)
+      def log(s: String): Unit = logInfo(log"${MDC(LINE, s)}")
       processStreamByLine(threadName, process.getErrorStream, log)
     }
     process
@@ -1216,7 +1224,8 @@ private[spark] object Utils
     val exitCode = process.waitFor()
     stdoutThread.join()   // Wait for it to finish reading output
     if (exitCode != 0) {
-      logError(s"Process $command exited with code $exitCode: $output")
+      logError(log"Process ${MDC(COMMAND, command)} exited with code " +
+        log"${MDC(EXIT_CODE, exitCode)}: ${MDC(COMMAND_OUTPUT, output)}")
       throw new SparkException(s"Process $command exited with code $exitCode")
     }
     output.toString
@@ -1272,11 +1281,13 @@ private[spark] object Utils
       case t: Throwable =>
         val currentThreadName = Thread.currentThread().getName
         if (sc != null) {
-          logError(s"uncaught error in thread $currentThreadName, stopping SparkContext", t)
+          logError(log"uncaught error in thread ${MDC(THREAD_NAME, currentThreadName)}, " +
+              log"stopping SparkContext", t)
           sc.stopInNewThread()
         }
         if (!NonFatal(t)) {
-          logError(s"throw uncaught fatal error in thread $currentThreadName", t)
+          logError(
+            log"throw uncaught fatal error in thread ${MDC(THREAD_NAME, currentThreadName)}", t)
           throw t
         }
     }
@@ -1288,7 +1299,8 @@ private[spark] object Utils
       block
     } catch {
       case NonFatal(t) =>
-        logError(s"Uncaught exception in thread ${Thread.currentThread().getName}", t)
+        logError(
+          log"Uncaught exception in thread ${MDC(THREAD_NAME, Thread.currentThread().getName)}", t)
     }
   }
 
@@ -1323,7 +1335,7 @@ private[spark] object Utils
           case t: Throwable =>
             if (originalThrowable != t) {
               originalThrowable.addSuppressed(t)
-              logWarning(s"Suppressing exception in catch: ${t.getMessage}", t)
+              logWarning(log"Suppressing exception in catch: ${MDC(ERROR, t.getMessage)}", t)
             }
         }
         throw originalThrowable
@@ -1333,10 +1345,90 @@ private[spark] object Utils
       } catch {
         case t: Throwable if (originalThrowable != null && originalThrowable != t) =>
           originalThrowable.addSuppressed(t)
-          logWarning(s"Suppressing exception in finally: ${t.getMessage}", t)
+          logWarning(log"Suppressing exception in finally: ${MDC(ERROR, t.getMessage)}", t)
           throw originalThrowable
       }
     }
+  }
+
+  val TRY_WITH_CALLER_STACKTRACE_FULL_STACKTRACE =
+    "Full stacktrace of original doTryWithCallerStacktrace caller"
+
+  val TRY_WITH_CALLER_STACKTRACE_TRY_STACKTRACE =
+    "Stacktrace under doTryWithCallerStacktrace"
+
+  /**
+   * Use Try with stacktrace substitution for the caller retrieving the error.
+   *
+   * Normally in case of failure, the exception would have the stacktrace of the caller that
+   * originally called doTryWithCallerStacktrace. However, we want to replace the part above
+   * this function with the stacktrace of the caller who calls getTryWithCallerStacktrace.
+   * So here we save the part of the stacktrace below doTryWithCallerStacktrace, and
+   * getTryWithCallerStacktrace will stitch it with the new stack trace of the caller.
+   * The full original stack trace is kept in ex.getSuppressed.
+   *
+   * @param f Code block to be wrapped in Try
+   * @return Try with Success or Failure of the code block. Use with getTryWithCallerStacktrace.
+   */
+  def doTryWithCallerStacktrace[T](f: => T): Try[T] = {
+    val t = Try {
+      f
+    }
+    t match {
+      case Failure(ex) =>
+        // Note: we remove the common suffix instead of e.g. finding the call to this function, to
+        // account for recursive calls with multiple doTryWithCallerStacktrace on the stack trace.
+        val origStackTrace = ex.getStackTrace
+        val currentStackTrace = Thread.currentThread().getStackTrace
+        val commonSuffixLen = origStackTrace.reverse.zip(currentStackTrace.reverse).takeWhile {
+          case (exElem, currentElem) => exElem == currentElem
+        }.length
+        val belowEx = new Exception(TRY_WITH_CALLER_STACKTRACE_TRY_STACKTRACE)
+        belowEx.setStackTrace(origStackTrace.dropRight(commonSuffixLen))
+        ex.addSuppressed(belowEx)
+
+        // keep the full original stack trace in a suppressed exception.
+        val fullEx = new Exception(TRY_WITH_CALLER_STACKTRACE_FULL_STACKTRACE)
+        fullEx.setStackTrace(origStackTrace)
+        ex.addSuppressed(fullEx)
+      case Success(_) => // nothing
+    }
+    t
+  }
+
+  /**
+   * Retrieve the result of Try that was created by doTryWithCallerStacktrace.
+   *
+   * In case of failure, the resulting exception has a stack trace that combines the stack trace
+   * below the original doTryWithCallerStacktrace which triggered it, with the caller stack trace
+   * of the current caller of getTryWithCallerStacktrace.
+   *
+   * Full stack trace of the original doTryWithCallerStacktrace caller can be retrieved with
+   * ```
+   * ex.getSuppressed.find { e =>
+   * e.getMessage == Utils.TRY_WITH_CALLER_STACKTRACE_FULL_STACKTRACE
+   * }
+   * ```
+   *
+   *
+   * @param t Try from doTryWithCallerStacktrace
+   * @return Result of the Try or rethrows the failure exception with modified stacktrace.
+   */
+  def getTryWithCallerStacktrace[T](t: Try[T]): T = t match {
+    case Failure(ex) =>
+      val belowStacktrace = ex.getSuppressed.find { e =>
+        // added in doTryWithCallerStacktrace
+        e.getMessage == TRY_WITH_CALLER_STACKTRACE_TRY_STACKTRACE
+      }.getOrElse {
+        // If we don't have the expected stacktrace information, just rethrow
+        throw ex
+      }.getStackTrace
+      // We are modifying and throwing the original exception. It would be better if we could
+      // return a copy, but we can't easily clone it and preserve. If this is accessed from
+      // multiple threads that then look at the stack trace, this could break.
+      ex.setStackTrace(belowStacktrace ++ Thread.currentThread().getStackTrace.drop(1))
+      throw ex
+    case Success(s) => s
   }
 
   // A regular expression to match classes of the internal Spark API's
@@ -1465,7 +1557,7 @@ private[spark] object Utils
       fileSize
     } catch {
       case e: Throwable =>
-        logError(s"Cannot get file length of ${file}", e)
+        logError(log"Cannot get file length of ${MDC(PATH, file)}", e)
         throw e
     } finally {
       if (gzInputStream != null) {
@@ -1741,12 +1833,6 @@ private[spark] object Utils
     Files.createSymbolicLink(dst.toPath, src.toPath)
   }
 
-
-  /** Return the class name of the given object, removing all dollar signs */
-  def getFormattedClassName(obj: AnyRef): String = {
-    getSimpleName(obj.getClass).replace("$", "")
-  }
-
   /**
    * Return a Hadoop FileSystem with the scheme encoded in the given path.
    */
@@ -1843,7 +1929,8 @@ private[spark] object Utils
       case ct: ControlThrowable =>
         throw ct
       case t: Throwable =>
-        logError(s"Uncaught exception in thread ${Thread.currentThread().getName}", t)
+        logError(
+          log"Uncaught exception in thread ${MDC(THREAD_NAME, Thread.currentThread().getName)}", t)
         throw t
     }
   }
@@ -1857,7 +1944,8 @@ private[spark] object Utils
       case ct: ControlThrowable =>
         throw ct
       case t: Throwable =>
-        logError(s"Uncaught exception in thread ${Thread.currentThread().getName}", t)
+        logError(
+          log"Uncaught exception in thread ${MDC(THREAD_NAME, Thread.currentThread().getName)}", t)
         scala.util.Failure(t)
     }
   }
@@ -2122,26 +2210,37 @@ private[spark] object Utils
 
   /**
    * Attempt to start a service on the given port, or fail after a number of attempts.
-   * Each subsequent attempt uses 1 + the port used in the previous attempt (unless the port is 0).
-   *
-   * @param startPort The initial port to start the service on.
-   * @param startService Function to start service on a given port.
-   *                     This is expected to throw java.net.BindException on port collision.
-   * @param conf A SparkConf used to get the maximum number of retries when binding to a port.
-   * @param serviceName Name of the service.
-   * @return (service: T, port: Int)
+   * Use a shared configuration for the maximum number of port retries.
    */
   def startServiceOnPort[T](
       startPort: Int,
       startService: Int => (T, Int),
       conf: SparkConf,
       serviceName: String = ""): (T, Int) = {
+    startServiceOnPort(startPort, startService, portMaxRetries(conf), serviceName)
+  }
+
+  /**
+   * Attempt to start a service on the given port, or fail after a number of attempts.
+   * Each subsequent attempt uses 1 + the port used in the previous attempt (unless the port is 0).
+   *
+   * @param startPort The initial port to start the service on.
+   * @param startService Function to start service on a given port.
+   *                     This is expected to throw java.net.BindException on port collision.
+   * @param maxRetries The maximum number of retries when binding to a port.
+   * @param serviceName Name of the service.
+   * @return (service: T, port: Int)
+   */
+  def startServiceOnPort[T](
+      startPort: Int,
+      startService: Int => (T, Int),
+      maxRetries: Int,
+      serviceName: String): (T, Int) = {
 
     require(startPort == 0 || (1024 <= startPort && startPort < 65536),
       "startPort should be between 1024 and 65535 (inclusive), or 0 for a random free port.")
 
     val serviceString = if (serviceName.isEmpty) "" else s" '$serviceName'"
-    val maxRetries = portMaxRetries(conf)
     for (offset <- 0 to maxRetries) {
       // Do not increment port if startPort is 0, which is treated as a special port
       val tryPort = if (startPort == 0) {
@@ -2151,7 +2250,8 @@ private[spark] object Utils
       }
       try {
         val (service, port) = startService(tryPort)
-        logInfo(s"Successfully started service$serviceString on port $port.")
+        logInfo(log"Successfully started service${MDC(SERVICE_NAME, serviceString)}" +
+          log" on port ${MDC(PORT, port)}.")
         return (service, port)
       } catch {
         case e: Exception if isBindCollision(e) =>
@@ -2176,11 +2276,13 @@ private[spark] object Utils
           if (startPort == 0) {
             // As startPort 0 is for a random free port, it is most possibly binding address is
             // not correct.
-            logWarning(s"Service$serviceString could not bind on a random free port. " +
-              "You may check whether configuring an appropriate binding address.")
+            logWarning(log"Service${MDC(SERVICE_NAME, serviceString)} " +
+              log"could not bind on a random free port. " +
+              log"You may check whether configuring an appropriate binding address.")
           } else {
-            logWarning(s"Service$serviceString could not bind on port $tryPort. " +
-              s"Attempting port ${tryPort + 1}.")
+            logWarning(log"Service${MDC(SERVICE_NAME, serviceString)} " +
+              log"could not bind on port ${MDC(PORT, tryPort)}. " +
+              log"Attempting port ${MDC(PORT2, tryPort + 1)}.")
           }
       }
     }
@@ -2202,6 +2304,9 @@ private[spark] object Utils
         e.getThrowables.asScala.exists(isBindCollision)
       case e: NativeIoException =>
         (e.getMessage != null && e.getMessage.startsWith("bind() failed: ")) ||
+          isBindCollision(e.getCause)
+      case e: IOException =>
+        (e.getMessage != null && e.getMessage.startsWith("Failed to bind to address")) ||
           isBindCollision(e.getCause)
       case e: Exception => isBindCollision(e.getCause)
       case _ => false
@@ -2344,7 +2449,8 @@ private[spark] object Utils
         val currentUserGroups = groupMappingServiceProvider.getGroups(username)
         return currentUserGroups
       } catch {
-        case e: Exception => logError(s"Error getting groups for user=$username", e)
+        case e: Exception =>
+          logError(log"Error getting groups for user=${MDC(USER_NAME, username)}", e)
       }
     }
     EMPTY_USER_GROUPS
@@ -2444,9 +2550,9 @@ private[spark] object Utils
         (isShuffleServiceAndYarn || isTesting) && ioEncryptionDisabled && serializerIsSupported
       }
       if (!canDoPushBasedShuffle) {
-        logWarning("Push-based shuffle can only be enabled when the application is submitted " +
-          "to run in YARN mode, with external shuffle service enabled, IO encryption disabled, " +
-          "and relocation of serialized objects supported.")
+        logWarning(log"Push-based shuffle can only be enabled when the application is submitted " +
+          log"to run in YARN mode, with external shuffle service enabled, IO encryption " +
+          log"disabled, and relocation of serialized objects supported.")
       }
 
       canDoPushBasedShuffle
@@ -2507,15 +2613,15 @@ private[spark] object Utils
    */
   def getDynamicAllocationInitialExecutors(conf: SparkConf): Int = {
     if (conf.get(DYN_ALLOCATION_INITIAL_EXECUTORS) < conf.get(DYN_ALLOCATION_MIN_EXECUTORS)) {
-      logWarning(s"${DYN_ALLOCATION_INITIAL_EXECUTORS.key} less than " +
-        s"${DYN_ALLOCATION_MIN_EXECUTORS.key} is invalid, ignoring its setting, " +
-          "please update your configs.")
+      logWarning(log"${MDC(CONFIG, DYN_ALLOCATION_INITIAL_EXECUTORS.key)} less than " +
+        log"${MDC(CONFIG2, DYN_ALLOCATION_MIN_EXECUTORS.key)} is invalid, ignoring its setting, " +
+        log"please update your configs.")
     }
 
     if (conf.get(EXECUTOR_INSTANCES).getOrElse(0) < conf.get(DYN_ALLOCATION_MIN_EXECUTORS)) {
-      logWarning(s"${EXECUTOR_INSTANCES.key} less than " +
-        s"${DYN_ALLOCATION_MIN_EXECUTORS.key} is invalid, ignoring its setting, " +
-          "please update your configs.")
+      logWarning(log"${MDC(CONFIG, EXECUTOR_INSTANCES.key)} less than " +
+        log"${MDC(CONFIG2, DYN_ALLOCATION_MIN_EXECUTORS.key)} is invalid, ignoring its setting, " +
+        log"please update your configs.")
     }
 
     val initialExecutors = Seq(
@@ -2523,9 +2629,10 @@ private[spark] object Utils
       conf.get(DYN_ALLOCATION_INITIAL_EXECUTORS),
       conf.get(EXECUTOR_INSTANCES).getOrElse(0)).max
 
-    logInfo(s"Using initial executors = $initialExecutors, max of " +
-      s"${DYN_ALLOCATION_INITIAL_EXECUTORS.key}, ${DYN_ALLOCATION_MIN_EXECUTORS.key} and " +
-        s"${EXECUTOR_INSTANCES.key}")
+    logInfo(log"Using initial executors = ${MDC(NUM_EXECUTORS, initialExecutors)}, max of " +
+      log"${MDC(CONFIG, DYN_ALLOCATION_INITIAL_EXECUTORS.key)}," +
+      log"${MDC(CONFIG2, DYN_ALLOCATION_MIN_EXECUTORS.key)} and" +
+      log" ${MDC(CONFIG3, EXECUTOR_INSTANCES.key)}")
     initialExecutors
   }
 
@@ -2551,6 +2658,32 @@ private[spark] object Utils
   def initDaemon(log: Logger): Unit = {
     log.info(s"Started daemon with process name: ${Utils.getProcessName()}")
     SignalUtils.registerLogger(log)
+  }
+
+  /**
+   * Utility function to enable or disable structured logging based on system properties.
+   * This is designed for a code path which we cannot use SparkConf yet, and should be used before
+   * the first invocation of `Logging.log()`. For example, this should be used before `initDaemon`.
+   */
+  def resetStructuredLogging(): Unit = {
+    if (System.getProperty(STRUCTURED_LOGGING_ENABLED.key, "false").equals("false")) {
+      Logging.disableStructuredLogging()
+    } else {
+      Logging.enableStructuredLogging()
+    }
+  }
+
+  /**
+   * Utility function to enable or disable structured logging based on SparkConf.
+   * This is designed for a code path which logging system may be initilized before
+   * loading SparkConf.
+   */
+  def resetStructuredLogging(sparkConf: SparkConf): Unit = {
+    if (sparkConf.getBoolean(STRUCTURED_LOGGING_ENABLED.key, defaultValue = true)) {
+      Logging.enableStructuredLogging()
+    } else {
+      Logging.disableStructuredLogging()
+    }
   }
 
   /**
@@ -2713,7 +2846,7 @@ private[spark] object Utils
           e.getCause() match {
             case uoe: UnsupportedOperationException =>
               logDebug(s"Extension $name not being initialized.", uoe)
-              logInfo(s"Extension $name not being initialized.")
+              logInfo(log"Extension ${MDC(CLASS_NAME, name)} not being initialized.")
               None
 
             case null => throw e
@@ -2737,8 +2870,8 @@ private[spark] object Utils
     // To handle master URLs, e.g., k8s://host:port.
     if (!masterWithoutK8sPrefix.contains("://")) {
       val resolvedURL = s"https://$masterWithoutK8sPrefix"
-      logInfo("No scheme specified for kubernetes master URL, so defaulting to https. Resolved " +
-        s"URL is $resolvedURL.")
+      logInfo(log"No scheme specified for kubernetes master URL, so defaulting to https." +
+        log" Resolved URL is ${MDC(LogKeys.URL, resolvedURL)}.")
       return s"k8s://$resolvedURL"
     }
 
@@ -2748,7 +2881,7 @@ private[spark] object Utils
       case Some("https") =>
         masterWithoutK8sPrefix
       case Some("http") =>
-        logWarning("Kubernetes master URL uses HTTP instead of HTTPS.")
+        logWarning(log"Kubernetes master URL uses HTTP instead of HTTPS.")
         masterWithoutK8sPrefix
       case _ =>
         throw new IllegalArgumentException("Invalid Kubernetes master scheme: " + masterScheme
@@ -2779,68 +2912,6 @@ private[spark] object Utils
     val secretBytes = new Array[Byte](bits / JByte.SIZE)
     rnd.nextBytes(secretBytes)
     Hex.encodeHexString(secretBytes)
-  }
-
-  /**
-   * Safer than Class obj's getSimpleName which may throw Malformed class name error in scala.
-   * This method mimics scalatest's getSimpleNameOfAnObjectsClass.
-   */
-  def getSimpleName(cls: Class[_]): String = {
-    try {
-      cls.getSimpleName
-    } catch {
-      // TODO: the value returned here isn't even quite right; it returns simple names
-      // like UtilsSuite$MalformedClassObject$MalformedClass instead of MalformedClass
-      // The exact value may not matter much as it's used in log statements
-      case _: InternalError =>
-        stripDollars(stripPackages(cls.getName))
-    }
-  }
-
-  /**
-   * Remove the packages from full qualified class name
-   */
-  private def stripPackages(fullyQualifiedName: String): String = {
-    fullyQualifiedName.split("\\.").takeRight(1)(0)
-  }
-
-  /**
-   * Remove trailing dollar signs from qualified class name,
-   * and return the trailing part after the last dollar sign in the middle
-   */
-  @scala.annotation.tailrec
-  def stripDollars(s: String): String = {
-    val lastDollarIndex = s.lastIndexOf('$')
-    if (lastDollarIndex < s.length - 1) {
-      // The last char is not a dollar sign
-      if (lastDollarIndex == -1 || !s.contains("$iw")) {
-        // The name does not have dollar sign or is not an interpreter
-        // generated class, so we should return the full string
-        s
-      } else {
-        // The class name is interpreter generated,
-        // return the part after the last dollar sign
-        // This is the same behavior as getClass.getSimpleName
-        s.substring(lastDollarIndex + 1)
-      }
-    }
-    else {
-      // The last char is a dollar sign
-      // Find last non-dollar char
-      val lastNonDollarChar = s.findLast(_ != '$')
-      lastNonDollarChar match {
-        case None => s
-        case Some(c) =>
-          val lastNonDollarIndex = s.lastIndexOf(c)
-          if (lastNonDollarIndex == -1) {
-            s
-          } else {
-            // Strip the trailing dollar signs
-            // Invoke stripDollars again to get the simple name
-            stripDollars(s.substring(0, lastNonDollarIndex + 1))
-          }
-      }
-    }
   }
 
   /**
@@ -2911,9 +2982,7 @@ private[spark] object Utils
     if (props == null) {
       return props
     }
-    val resultProps = new Properties()
-    props.forEach((k, v) => resultProps.put(k, v))
-    resultProps
+    props.clone().asInstanceOf[Properties]
   }
 
   /**
@@ -2962,10 +3031,10 @@ private[spark] object Utils
   }
 
   /** Returns a string message about delegation token generation failure */
-  def createFailedToGetTokenMessage(serviceName: String, e: scala.Throwable): String = {
-    val message = "Failed to get token from service %s due to %s. " +
-      "If %s is not used, set spark.security.credentials.%s.enabled to false."
-    message.format(serviceName, e, serviceName, serviceName)
+  def createFailedToGetTokenMessage(serviceName: String, e: scala.Throwable): MessageWithContext = {
+    log"Failed to get token from service ${MDC(SERVICE_NAME, serviceName)} " +
+      log"due to ${MDC(ERROR, e)}. If ${MDC(SERVICE_NAME, serviceName)} is not used, " +
+      log"set spark.security.credentials.${MDC(SERVICE_NAME, serviceName)}.enabled to false."
   }
 
   /**
@@ -2991,7 +3060,7 @@ private[spark] object Utils
         entry = in.getNextEntry()
       }
       in.close() // so that any error in closing does not get ignored
-      logInfo(s"Unzipped from $dfsZipFile\n\t${files.mkString("\n\t")}")
+      logInfo(log"Unzipped from ${MDC(PATH, dfsZipFile)}\n\t${MDC(PATHS, files.mkString("\n\t"))}")
     } finally {
       // Close everything no matter what happened
       IOUtils.closeQuietly(in)
@@ -3108,7 +3177,8 @@ private[spark] class CallerContext(
       context
     } else {
       val finalContext = context.substring(0, len)
-      logWarning(s"Truncated Spark caller context from $context to $finalContext")
+      logWarning(log"Truncated Spark caller context from ${MDC(CONTEXT, context)} " +
+        log"to ${MDC(FINAL_CONTEXT, finalContext)}")
       finalContext
     }
   }

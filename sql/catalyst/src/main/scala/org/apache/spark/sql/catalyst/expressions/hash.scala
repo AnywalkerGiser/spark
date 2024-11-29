@@ -33,7 +33,7 @@ import org.apache.spark.sql.catalyst.expressions.Cast._
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.expressions.codegen.Block._
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
-import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
+import org.apache.spark.sql.catalyst.util.{ArrayData, CollationFactory, MapData}
 import org.apache.spark.sql.catalyst.util.DateTimeConstants._
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.internal.SQLConf
@@ -61,9 +61,10 @@ import org.apache.spark.util.ArrayImplicits._
   since = "1.5.0",
   group = "hash_funcs")
 case class Md5(child: Expression)
-  extends UnaryExpression with ImplicitCastInputTypes with NullIntolerant {
+  extends UnaryExpression with ImplicitCastInputTypes {
+  override def nullIntolerant: Boolean = true
 
-  override def dataType: DataType = StringType
+  override def dataType: DataType = SQLConf.get.defaultStringType
 
   override def inputTypes: Seq[DataType] = Seq(BinaryType)
 
@@ -101,9 +102,10 @@ case class Md5(child: Expression)
   group = "hash_funcs")
 // scalastyle:on line.size.limit
 case class Sha2(left: Expression, right: Expression)
-  extends BinaryExpression with ImplicitCastInputTypes with NullIntolerant with Serializable {
+  extends BinaryExpression with ImplicitCastInputTypes with Serializable {
+  override def nullIntolerant: Boolean = true
 
-  override def dataType: DataType = StringType
+  override def dataType: DataType = SQLConf.get.defaultStringType
   override def nullable: Boolean = true
 
   override def inputTypes: Seq[DataType] = Seq(BinaryType, IntegerType)
@@ -167,9 +169,10 @@ case class Sha2(left: Expression, right: Expression)
   since = "1.5.0",
   group = "hash_funcs")
 case class Sha1(child: Expression)
-  extends UnaryExpression with ImplicitCastInputTypes with NullIntolerant {
+  extends UnaryExpression with ImplicitCastInputTypes {
+  override def nullIntolerant: Boolean = true
 
-  override def dataType: DataType = StringType
+  override def dataType: DataType = SQLConf.get.defaultStringType
 
   override def inputTypes: Seq[DataType] = Seq(BinaryType)
 
@@ -199,7 +202,8 @@ case class Sha1(child: Expression)
   since = "1.5.0",
   group = "hash_funcs")
 case class Crc32(child: Expression)
-  extends UnaryExpression with ImplicitCastInputTypes with NullIntolerant {
+  extends UnaryExpression with ImplicitCastInputTypes {
+  override def nullIntolerant: Boolean = true
 
   override def dataType: DataType = LongType
 
@@ -271,6 +275,10 @@ abstract class HashExpression[E] extends Expression {
     dt.existsRecursively(_.isInstanceOf[MapType])
   }
 
+  private def hasVariantType(dt: DataType): Boolean = {
+    dt.existsRecursively(_.isInstanceOf[VariantType])
+  }
+
   override def checkInputDataTypes(): TypeCheckResult = {
     if (children.length < 1) {
       throw QueryCompilationErrors.wrongNumArgsError(
@@ -280,6 +288,10 @@ abstract class HashExpression[E] extends Expression {
         !SQLConf.get.getConf(SQLConf.LEGACY_ALLOW_HASH_ON_MAPTYPE)) {
       DataTypeMismatch(
         errorSubClass = "HASH_MAP_TYPE",
+        messageParameters = Map("functionName" -> toSQLId(prettyName)))
+    } else if (children.exists(child => hasVariantType(child.dataType))) {
+      DataTypeMismatch(
+        errorSubClass = "HASH_VARIANT_TYPE",
         messageParameters = Map("functionName" -> toSQLId(prettyName)))
     } else {
       TypeCheckResult.TypeCheckSuccess
@@ -407,7 +419,7 @@ abstract class HashExpression[E] extends Expression {
 
   protected def genHashString(
       ctx: CodegenContext, stringType: StringType, input: String, result: String): String = {
-    if (stringType.isBinaryCollation) {
+    if (stringType.supportsBinaryEquality && !stringType.usesTrimCollation) {
       val baseObject = s"$input.getBaseObject()"
       val baseOffset = s"$input.getBaseOffset()"
       val numBytes = s"$input.numBytes()"
@@ -557,7 +569,15 @@ abstract class InterpretedHashFunction {
       case a: Array[Byte] =>
         hashUnsafeBytes(a, Platform.BYTE_ARRAY_OFFSET, a.length, seed)
       case s: UTF8String =>
-        hashUnsafeBytes(s.getBaseObject, s.getBaseOffset, s.numBytes(), seed)
+        val st = dataType.asInstanceOf[StringType]
+        if (st.supportsBinaryEquality && !st.usesTrimCollation) {
+          hashUnsafeBytes(s.getBaseObject, s.getBaseOffset, s.numBytes(), seed)
+        } else {
+          val stringHash = CollationFactory
+            .fetchCollation(st.collationId)
+            .hashFunction.applyAsLong(s)
+          hashLong(stringHash, seed)
+        }
 
       case array: ArrayData =>
         val elementType = dataType match {
@@ -801,7 +821,7 @@ case class HiveHash(children: Seq[Expression]) extends HashExpression[Int] {
 
   override protected def genHashString(
       ctx: CodegenContext, stringType: StringType, input: String, result: String): String = {
-    if (stringType.isBinaryCollation) {
+    if (stringType.supportsBinaryEquality && !stringType.usesTrimCollation) {
       val baseObject = s"$input.getBaseObject()"
       val baseOffset = s"$input.getBaseOffset()"
       val numBytes = s"$input.numBytes()"

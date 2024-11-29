@@ -21,14 +21,10 @@ import unittest
 
 import numpy as np
 
+from pyspark.util import is_remote_only
 from pyspark.sql import SparkSession
 from pyspark.testing.connectutils import should_test_connect, connect_requirement_message
-
-have_torch = True
-try:
-    import torch  # noqa: F401
-except ImportError:
-    have_torch = False
+from pyspark.testing.utils import have_torch, torch_requirement_message
 
 if should_test_connect:
     from pyspark.ml.connect.classification import (
@@ -132,6 +128,8 @@ class ClassificationTestsMixin:
         self._check_result(local_transform_result, expected_predictions, expected_probabilities)
 
     def test_save_load(self):
+        import torch
+
         with tempfile.TemporaryDirectory(prefix="test_save_load") as tmp_dir:
             estimator = LORV2(maxIter=2, numTrainWorkers=2, learningRate=0.001)
             local_path = os.path.join(tmp_dir, "estimator")
@@ -228,7 +226,10 @@ class ClassificationTestsMixin:
 
 
 @unittest.skipIf(
-    not should_test_connect or not have_torch, connect_requirement_message or "No torch found"
+    not should_test_connect or not have_torch or is_remote_only(),
+    connect_requirement_message
+    or torch_requirement_message
+    or "pyspark-connect cannot test classic Spark",
 )
 class ClassificationTests(ClassificationTestsMixin, unittest.TestCase):
     def setUp(self) -> None:

@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.types
 
+import org.json4s.JsonAST.{JString, JValue}
+
 import org.apache.spark.annotation.Stable
 import org.apache.spark.sql.catalyst.util.CollationFactory
 
@@ -24,31 +26,61 @@ import org.apache.spark.sql.catalyst.util.CollationFactory
  * The data type representing `String` values. Please use the singleton `DataTypes.StringType`.
  *
  * @since 1.3.0
- * @param collationId The id of collation for this StringType.
+ * @param collationId
+ *   The id of collation for this StringType.
  */
 @Stable
-class StringType private(val collationId: Int) extends AtomicType with Serializable {
-  /**
-   * Returns whether assigned collation is the default spark collation (UTF8_BINARY).
-   */
-  def isDefaultCollation: Boolean = collationId == CollationFactory.DEFAULT_COLLATION_ID
+class StringType private (val collationId: Int) extends AtomicType with Serializable {
 
   /**
-   * Binary collation implies that strings are considered equal only if they are
-   * byte for byte equal. E.g. all accent or case-insensitive collations are considered non-binary.
-   * If this field is true, byte level operations can be used against this datatype (e.g. for
+   * Support for Binary Equality implies that strings are considered equal only if they are byte
+   * for byte equal. E.g. all accent or case-insensitive collations are considered non-binary. If
+   * this field is true, byte level operations can be used against this datatype (e.g. for
    * equality and hashing).
    */
-  def isBinaryCollation: Boolean = CollationFactory.fetchCollation(collationId).isBinaryCollation
-  def isLowercaseCollation: Boolean = collationId == CollationFactory.LOWERCASE_COLLATION_ID
+  private[sql] def supportsBinaryEquality: Boolean =
+    CollationFactory.fetchCollation(collationId).supportsBinaryEquality
+
+  private[sql] def supportsLowercaseEquality: Boolean =
+    CollationFactory.fetchCollation(collationId).supportsLowercaseEquality
+
+  private[sql] def isCaseInsensitive: Boolean =
+    CollationFactory.isCaseInsensitive(collationId)
+
+  private[sql] def isAccentInsensitive: Boolean =
+    CollationFactory.isAccentInsensitive(collationId)
+
+  private[sql] def usesTrimCollation: Boolean =
+    CollationFactory.fetchCollation(collationId).supportsSpaceTrimming
+
+  private[sql] def isUTF8BinaryCollation: Boolean =
+    collationId == CollationFactory.UTF8_BINARY_COLLATION_ID
+
+  private[sql] def isUTF8LcaseCollation: Boolean =
+    collationId == CollationFactory.UTF8_LCASE_COLLATION_ID
 
   /**
-   * Type name that is shown to the customer.
-   * If this is an UTF8_BINARY collation output is `string` due to backwards compatibility.
+   * Support for Binary Ordering implies that strings are considered equal only if they are byte
+   * for byte equal. E.g. all accent or case-insensitive collations are considered non-binary.
+   * Also their ordering does not require calls to ICU library, as it follows spark internal
+   * implementation. If this field is true, byte level operations can be used against this
+   * datatype (e.g. for equality, hashing and ordering).
+   */
+  private[sql] def supportsBinaryOrdering: Boolean =
+    CollationFactory.fetchCollation(collationId).supportsBinaryOrdering
+
+  /**
+   * Type name that is shown to the customer. If this is an UTF8_BINARY collation output is
+   * `string` due to backwards compatibility.
    */
   override def typeName: String =
-    if (isDefaultCollation) "string"
+    if (isUTF8BinaryCollation) "string"
     else s"string collate ${CollationFactory.fetchCollation(collationId).collationName}"
+
+  // Due to backwards compatibility and compatibility with other readers
+  // all string types are serialized in json as regular strings and
+  // the collation information is written to struct field metadata
+  override def jsonValue: JValue = JString("string")
 
   override def equals(obj: Any): Boolean =
     obj.isInstanceOf[StringType] && obj.asInstanceOf[StringType].collationId == collationId
@@ -70,5 +102,10 @@ class StringType private(val collationId: Int) extends AtomicType with Serializa
  */
 @Stable
 case object StringType extends StringType(0) {
-  def apply(collationId: Int): StringType = new StringType(collationId)
+  private[spark] def apply(collationId: Int): StringType = new StringType(collationId)
+
+  def apply(collation: String): StringType = {
+    val collationId = CollationFactory.collationNameToId(collation)
+    new StringType(collationId)
+  }
 }
